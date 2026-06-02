@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Large data files (never commit)
+*.tif
+*.tiff
+*.ome.tif
+*.zarr/
+
+# HPC runtime state
+petakit_jobs/
+
+# IDE / tool state
+.gemini/
+*.swp
+*.swo
+*~
