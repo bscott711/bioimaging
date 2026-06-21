@@ -13,6 +13,7 @@ import dask.array as da
 from opym.petakit import (
     submit_remote_crop_job,
     submit_remote_deskew_job,
+    submit_remote_decon_job,
     wait_for_job,
 )
 
@@ -40,6 +41,9 @@ def _run_job_chain(
     crop_job_path: Path, output_dir: Path, z_step_um: float, rotate_90: bool,
     sheet_angle_deg: float = 30.0,
     objective_scan: bool = True, z_stage_scan: bool = False, reverse: bool = False,
+    run_decon: bool = True,
+    psf_path: Path | str | None = None,
+    decon_iters: int = 10,
     gpu_decon: bool = False,
 ):
     """Waits for jobs to finish with a live console timer, then chains them."""
@@ -74,9 +78,51 @@ def _run_job_chain(
         time.sleep(2)
 
     if success:
-        print("🚀 Submitting Deskew job to PetaKit...")
+        deskew_input = output_dir
+
+        if run_decon and psf_path:
+            print("\n🚀 Submitting standalone Decon job to PetaKit...")
+            decon_ticket = submit_remote_decon_job(
+                input_target=output_dir,
+                psf_paths=psf_path,
+                iterations=decon_iters,
+                gpu_job=gpu_decon,
+                skewed=True,
+                result_dir_name="Decon",
+                channel_patterns=[output_dir.name],
+            )
+            
+            d_name = decon_ticket.name
+            d_done = base_dir / "completed" / d_name
+            d_fail = base_dir / "failed" / d_name
+            
+            d_start = time.time()
+            decon_success = False
+            while True:
+                d_elapsed = int(time.time() - d_start)
+                if d_done.exists():
+                    sys.stdout.write(f"\r✅ Decon job completed in {d_elapsed}s!{' ' * 20}\n")
+                    sys.stdout.flush()
+                    decon_success = True
+                    break
+                elif d_fail.exists():
+                    sys.stdout.write(f"\r❌ Decon job failed after {d_elapsed}s!{' ' * 20}\n")
+                    sys.stdout.flush()
+                    break
+                
+                sys.stdout.write(f"\r⏱️  Decon Elapsed: {d_elapsed}s | Status: GPUs are crunching...{' ' * 5}")
+                sys.stdout.flush()
+                time.sleep(2)
+
+            if not decon_success:
+                print("\n❌ Decon job failed. Aborting deskew submission.")
+                return
+            
+            deskew_input = output_dir / "Decon"
+
+        print("\n🚀 Submitting Deskew job to PetaKit...")
         deskew_ticket = submit_remote_deskew_job(
-            input_target=output_dir,
+            input_target=deskew_input,
             z_step_um=z_step_um,
             sheet_angle_deg=sheet_angle_deg,
             deskew=True,
@@ -86,6 +132,9 @@ def _run_job_chain(
             reverse=reverse,
             gpu_decon=gpu_decon,
             crop_was_rotated=rotate_90,
+            psf_path=None,
+            n_iters=None,
+            channel_patterns=[output_dir.name],
         )
         print(f"✅ Deskew job successfully queued: {deskew_ticket.name}")
         
@@ -185,12 +234,17 @@ def _save_intermediate_crops(
     print(f"💾 Saved {saved_count} intermediate crops to {crop_dir}")
 
 
-@magic_factory(call_button="🚀 Crop & Deskew (PetaKit)")
+@magic_factory(
+    call_button="🚀 Crop -> (Decon) -> Deskew",
+    xy_pixel_size={"step": 0.001},
+    z_step_um={"step": 0.001},
+)
 def petakit_pipeline(
     viewer: "napari.viewer.Viewer",
     image_layer: "napari.layers.Image",
     shapes_layer: "napari.layers.Shapes",
     z_step_um: float = 0.1,
+    xy_pixel_size: float = 0.136,
     sheet_angle_deg: float = 30.0,
     output_format: str = "tiff-series",
     rotate_90: bool = True,
@@ -198,7 +252,9 @@ def petakit_pipeline(
     objective_scan: bool = False,
     z_stage_scan: bool = False,
     reverse: bool = True,
-    gpu_decon: bool = False,
+    run_decon: bool = True,
+    psf_path: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/Master_PSF_Final_Strict.tif"),
+    decon_iters: int = 10,
 ):
     """Parses visual ROIs, enforces matching sizes, and chains crop+deskew jobs."""
     source_path = image_layer.source.path
@@ -303,6 +359,11 @@ def petakit_pipeline(
         folder_name = folder_name[:-8]
     elif folder_name.lower().endswith(".tif"):
         folder_name = folder_name[:-4]
+        
+    t0_only = image_layer.metadata.get("t0_only", False)
+    if t0_only:
+        folder_name = f"{folder_name}_test"
+        
     output_dir = base_file.parent / folder_name
 
     # Save intermediate crops for diagnostic inspection (before HPC job)
@@ -331,6 +392,9 @@ def petakit_pipeline(
             timepoints=target_timepoints,
             output_format=output_format,
             rotate=rotate_90,
+            z_step_um=z_step_um,
+            xy_pixel_size=xy_pixel_size,
+            test_mode=t0_only,
         )
 
         worker = _run_job_chain(
@@ -342,7 +406,10 @@ def petakit_pipeline(
             objective_scan=objective_scan,
             z_stage_scan=z_stage_scan,
             reverse=reverse,
-            gpu_decon=gpu_decon,
+            run_decon=run_decon,
+            psf_path=psf_path,
+            decon_iters=decon_iters,
+            gpu_decon=True,
         )
         worker.start()
 
