@@ -7,6 +7,8 @@ from napari.qt.threading import thread_worker
 from pathlib import Path
 from xml.etree import ElementTree as ET
 import tifffile
+import zarr
+import dask.array as da
 
 from opym.petakit import (
     submit_remote_crop_job,
@@ -35,7 +37,10 @@ def _get_z_step_um(path: Path) -> float | None:
 
 @thread_worker
 def _run_job_chain(
-    crop_job_path: Path, output_dir: Path, z_step_um: float, rotate_90: bool
+    crop_job_path: Path, output_dir: Path, z_step_um: float, rotate_90: bool,
+    sheet_angle_deg: float = 30.0,
+    objective_scan: bool = True, z_stage_scan: bool = False, reverse: bool = False,
+    gpu_decon: bool = False,
 ):
     """Waits for jobs to finish with a live console timer, then chains them."""
     job_name = crop_job_path.name
@@ -73,10 +78,14 @@ def _run_job_chain(
         deskew_ticket = submit_remote_deskew_job(
             input_target=output_dir,
             z_step_um=z_step_um,
+            sheet_angle_deg=sheet_angle_deg,
             deskew=True,
-            rotate=rotate_90,
-            input_axis_order='yxz',  # 🔑 MATLAB native: cropper writes (H,W,Z) = (Y,X,Z)
-            output_axis_order='yxz', # 🔑 Keep PetaKit5D default output order
+            rotate=True,
+            objective_scan=objective_scan,
+            z_stage_scan=z_stage_scan,
+            reverse=reverse,
+            gpu_decon=gpu_decon,
+            crop_was_rotated=rotate_90,
         )
         print(f"✅ Deskew job successfully queued: {deskew_ticket.name}")
         
@@ -113,6 +122,7 @@ def _save_intermediate_crops(
     bottom_roi: tuple[slice, slice],
     output_dir: Path,
     base_name: str,
+    rotate_90: bool = False,
 ) -> None:
     """Save cropped ROI regions from napari memory into a CROP/ subfolder.
 
@@ -160,6 +170,8 @@ def _save_intermediate_crops(
                 continue
             # Extract: data is (Z, C, Y, X)
             stack = data[:, cam_idx, roi[0], roi[1]]  # → (Z, crop_Y, crop_X)
+            if rotate_90:
+                stack = np.rot90(stack, k=1, axes=(1, 2))
             out_ch = out_base + ch_offset
             out_name = f"{base_name}_C{out_ch:02d}_T000.tif"
             tifffile.imwrite(
@@ -179,12 +191,20 @@ def petakit_pipeline(
     image_layer: "napari.layers.Image",
     shapes_layer: "napari.layers.Shapes",
     z_step_um: float = 0.1,
+    sheet_angle_deg: float = 30.0,
     output_format: str = "tiff-series",
     rotate_90: bool = True,
     save_intermediates: bool = True,
+    objective_scan: bool = False,
+    z_stage_scan: bool = False,
+    reverse: bool = True,
+    gpu_decon: bool = False,
 ):
     """Parses visual ROIs, enforces matching sizes, and chains crop+deskew jobs."""
     source_path = image_layer.source.path
+    if not source_path:
+        source_path = image_layer.metadata.get("path")
+        
     if not source_path:
         print("❌ Error: Could not determine file path. Did you drag and drop?")
         return
@@ -294,9 +314,13 @@ def petakit_pipeline(
                 bottom_roi=bottom_roi,
                 output_dir=output_dir,
                 base_name=folder_name,
+                rotate_90=rotate_90,
             )
         except Exception as e:
             print(f"⚠️  Could not save intermediates: {e}")
+
+    t0_only = image_layer.metadata.get("t0_only", False)
+    target_timepoints = [1] if t0_only else None
 
     try:
         crop_job_ticket = submit_remote_crop_job(
@@ -304,8 +328,9 @@ def petakit_pipeline(
             top_roi=top_roi,
             bottom_roi=bottom_roi,
             channels=None,
+            timepoints=target_timepoints,
             output_format=output_format,
-            rotate=False,
+            rotate=rotate_90,
         )
 
         worker = _run_job_chain(
@@ -313,11 +338,29 @@ def petakit_pipeline(
             output_dir=output_dir,
             z_step_um=z_step_um,
             rotate_90=rotate_90,
+            sheet_angle_deg=sheet_angle_deg,
+            objective_scan=objective_scan,
+            z_stage_scan=z_stage_scan,
+            reverse=reverse,
+            gpu_decon=gpu_decon,
         )
         worker.start()
 
     except Exception as e:
         print(f"❌ Failed to queue job pipeline: {e}")
+@magic_factory(call_button="Load OME-TIFF")
+def load_lazy_ome_tiff(file_path: Path, first_timepoint_only: bool = False) -> napari.types.LayerDataTuple:
+    """Open a massive OME-TIFF as a lazy Dask array via a file selector."""
+    store = tifffile.imread(file_path, aszarr=True)
+    z = zarr.open(store, mode="r")
+    lazy_data = da.from_zarr(z)
+
+    layer_name = file_path.name
+    if first_timepoint_only and lazy_data.ndim >= 5:
+        lazy_data = lazy_data[0]
+        layer_name = f"{file_path.name} (T=0)"
+
+    return (lazy_data, {"name": layer_name, "multiscale": False, "metadata": {"path": str(file_path), "t0_only": first_timepoint_only}}, "image")
 
 
 if __name__ == "__main__":
@@ -329,6 +372,10 @@ if __name__ == "__main__":
 
     viewer.window.add_dock_widget(
         petakit_pipeline(), name="Opym PetaKit", area="right"
+    )
+
+    viewer.window.add_dock_widget(
+        load_lazy_ome_tiff(), name="OME-TIFF Loader", area="right"
     )
 
     napari.run()

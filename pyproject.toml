@@ -17,6 +17,7 @@ dependencies = [
     "tifffile<2024.8.10",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
+    "zarr<3",
 ]
 
 [[tool.uv.index]]
@@ -27,4 +28,4 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cuda" }]
 torchvision = [{ index = "pytorch-cuda" }]
-opym = { url = "https://github.com/bscott711/opym/archive/refs/heads/main.zip" }
+opym = { path = "../opym_local", editable = true }

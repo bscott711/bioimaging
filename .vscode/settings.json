@@ -1,0 +1,20 @@
+{
+    "git.path": "/mmfs2/cm/shared/apps_local/git/2.50.0/bin/git",
+    "argus.models": [
+        {
+            "title": "Nemotron 120B (Argus)",
+            "provider": "openai",
+            "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+            "apiBase": "http://localhost:8000/v1",
+            "contextLength": 65536,
+            "apiKey": "EMPTY"
+        }
+    ],
+    "terminal.integrated.profiles.linux": {
+        "bash with git module": {
+            "path": "bash",
+            "args": ["-lc", "module load git && exec bash"]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "bash with git module"
+}

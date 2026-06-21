@@ -1,0 +1,76 @@
+{
+  "models": [
+    {
+      "title": "Nemotron 120B (Argus)",
+      "provider": "openai",
+      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+      "apiBase": "http://localhost:8000/v1",
+      "contextLength": 65536,
+      "apiKey": "EMPTY"
+    },
+    {
+      "apiKey": "dlyyVFaAHlQrHjAzznPCBBd5dYsJ1Slq",
+      "title": "Codestral",
+      "model": "codestral-latest",
+      "provider": "mistral"
+    },
+    {
+      "apiKey": "N8uJEOQ9Mby0nwWEDRdI90KEIL6KnAJF",
+      "title": "Mistral Large",
+      "model": "mistral-large-latest",
+      "provider": "mistral"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "Tab Autocomplete",
+    "provider": "vllm",
+    "model": "codestral-latest"
+  },
+  "contextProviders": [
+    {
+      "name": "code",
+      "params": {}
+    },
+    {
+      "name": "docs",
+      "params": {}
+    },
+    {
+      "name": "diff",
+      "params": {}
+    },
+    {
+      "name": "terminal",
+      "params": {}
+    },
+    {
+      "name": "problems",
+      "params": {}
+    },
+    {
+      "name": "folder",
+      "params": {}
+    },
+    {
+      "name": "codebase",
+      "params": {}
+    }
+  ],
+  "slashCommands": [
+    {
+      "name": "share",
+      "description": "Export the current chat session to markdown"
+    },
+    {
+      "name": "cmd",
+      "description": "Generate a shell command"
+    },
+    {
+      "name": "commit",
+      "description": "Generate a git commit message"
+    }
+  ],
+  "embeddingsProvider": {
+    "provider": "mistral"
+  }
+}
