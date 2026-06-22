@@ -1,5 +1,6 @@
 import sys
 import time
+import typing
 import napari
 import numpy as np
 from magicgui import magic_factory
@@ -38,13 +39,20 @@ def _get_z_step_um(path: Path) -> float | None:
 
 @thread_worker
 def _run_job_chain(
-    crop_job_path: Path, output_dir: Path, z_step_um: float, rotate_90: bool,
-    sheet_angle_deg: float = 30.0,
-    objective_scan: bool = True, z_stage_scan: bool = False, reverse: bool = False,
+    crop_job_path: Path,
+    output_dir: Path,
+    z_step_um: float = 0.1,
+    rotate_90: bool = True,
+    sheet_angle_deg: float = 60.0,
+    objective_scan: bool = False,
+    z_stage_scan: bool = False,
+    reverse: bool = True,
     run_decon: bool = True,
-    psf_path: Path | str | None = None,
+    psf_paths: dict | None = None,
     decon_iters: int = 10,
-    gpu_decon: bool = False,
+    use_omw: bool = False,
+    gpu_decon: bool = True,
+    active_channels: list[str] | None = None,
 ):
     """Waits for jobs to finish with a live console timer, then chains them."""
     job_name = crop_job_path.name
@@ -80,37 +88,79 @@ def _run_job_chain(
     if success:
         deskew_input = output_dir
 
-        if run_decon and psf_path:
-            print("\n🚀 Submitting standalone Decon job to PetaKit...")
-            decon_ticket = submit_remote_decon_job(
-                input_target=output_dir,
-                psf_paths=psf_path,
-                iterations=decon_iters,
-                gpu_job=gpu_decon,
-                skewed=True,
-                result_dir_name="Decon",
-                channel_patterns=[output_dir.name],
-            )
+        if run_decon:
+            print("\n🚀 Submitting parallel Decon jobs to PetaKit...")
+            emissions = {
+                "GFP": 525,
+                "Calcein_Violet": 450,
+                "mScarlet": 595,
+                "CF647": 670,
+            }
             
-            d_name = decon_ticket.name
-            d_done = base_dir / "completed" / d_name
-            d_fail = base_dir / "failed" / d_name
+            if active_channels:
+                emissions = {k: v for k, v in emissions.items() if k in active_channels}
+            
+            decon_tickets = []
+            
+            for name, wvl in emissions.items():
+                if list(output_dir.glob(f"*{name}*.tif")):
+                    psf_file = psf_paths.get(name) if psf_paths else Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif")
+                    channel_pattern = f"{output_dir.name}_{name}"
+                    ticket = submit_remote_decon_job(
+                        input_target=output_dir,
+                        psf_paths=psf_file,
+                        iterations=decon_iters,
+                        gpu_job=gpu_decon,
+                        skewed=True,
+                        result_dir_name="Decon",
+                        channel_patterns=[channel_pattern],
+                        rl_method="omw" if use_omw else "simplified",
+                    )
+                    decon_tickets.append(ticket)
+            
+            if not decon_tickets:
+                master_psf = psf_paths.get("Master") if psf_paths else None
+                if master_psf:
+                    print("⚠️ No output crops found matching known emission wavelengths. Falling back to single master job...")
+                    ticket = submit_remote_decon_job(
+                        input_target=output_dir,
+                        psf_paths=master_psf,
+                        iterations=decon_iters,
+                        gpu_job=gpu_decon,
+                        skewed=True,
+                        result_dir_name="Decon",
+                        channel_patterns=[output_dir.name],
+                        rl_method="omw" if use_omw else "simplified",
+                    )
+                    decon_tickets.append(ticket)
+            
+            print(f"🚀 Dispatched {len(decon_tickets)} Decon jobs concurrently!")
             
             d_start = time.time()
             decon_success = False
+            
             while True:
                 d_elapsed = int(time.time() - d_start)
-                if d_done.exists():
-                    sys.stdout.write(f"\r✅ Decon job completed in {d_elapsed}s!{' ' * 20}\n")
+                completed_count = 0
+                failed_count = 0
+                
+                for t in decon_tickets:
+                    if (base_dir / "completed" / t.name).exists():
+                        completed_count += 1
+                    elif (base_dir / "failed" / t.name).exists():
+                        failed_count += 1
+                
+                if failed_count > 0:
+                    sys.stdout.write(f"\r❌ Decon jobs failed after {d_elapsed}s!{' ' * 20}\n")
+                    sys.stdout.flush()
+                    break
+                elif completed_count == len(decon_tickets) and len(decon_tickets) > 0:
+                    sys.stdout.write(f"\r✅ All Decon jobs completed in {d_elapsed}s!{' ' * 20}\n")
                     sys.stdout.flush()
                     decon_success = True
                     break
-                elif d_fail.exists():
-                    sys.stdout.write(f"\r❌ Decon job failed after {d_elapsed}s!{' ' * 20}\n")
-                    sys.stdout.flush()
-                    break
                 
-                sys.stdout.write(f"\r⏱️  Decon Elapsed: {d_elapsed}s | Status: GPUs are crunching...{' ' * 5}")
+                sys.stdout.write(f"\r⏱️  Decon Elapsed: {d_elapsed}s | Status: {completed_count}/{len(decon_tickets)} completed...{' ' * 5}")
                 sys.stdout.flush()
                 time.sleep(2)
 
@@ -165,74 +215,6 @@ def _run_job_chain(
         print(f"   Check logs at: {fail_path}.log")
 
 
-def _save_intermediate_crops(
-    image_data: np.ndarray,
-    top_roi: tuple[slice, slice],
-    bottom_roi: tuple[slice, slice],
-    output_dir: Path,
-    base_name: str,
-    rotate_90: bool = False,
-) -> None:
-    """Save cropped ROI regions from napari memory into a CROP/ subfolder.
-
-    This is a diagnostic tool for inspecting what the crop stage produces
-    before deskewing. Saves T=0 only, one file per camera/ROI combination,
-    using the same naming convention as the full pipeline output.
-    """
-    crop_dir = output_dir / "CROP"
-    crop_dir.mkdir(parents=True, exist_ok=True)
-
-    data = image_data
-    ndim = data.ndim
-
-    # Determine data layout and extract a single timepoint
-    # Expected shapes: 5D (T,Z,C,Y,X), 4D (Z,C,Y,X), or 3D (Z,Y,X)
-    if ndim == 5:
-        data = data[0]  # T=0 → (Z,C,Y,X)
-    if ndim >= 4 and data.ndim == 4:
-        Z, C, Y, X = data.shape
-    elif data.ndim == 3:
-        # Single-channel: (Z,Y,X)
-        Z, Y, X = data.shape
-        C = 1
-        data = data[:, np.newaxis, :, :]  # → (Z,1,Y,X)
-    else:
-        print(f"⚠️  Cannot save intermediates: unexpected data shape {image_data.shape}")
-        return
-
-    n_excitations = max(1, C // 2)
-    tif_meta = {"axes": "ZYX"}
-    saved_count = 0
-
-    for exc in range(n_excitations):
-        cam0_idx = exc
-        cam1_idx = exc + n_excitations if C > 1 else 0
-        out_base = exc * 4
-
-        for label, roi, cam_idx, ch_offset in [
-            ("Bot-Cam0", bottom_roi, cam0_idx, 0),
-            ("Top-Cam0", top_roi, cam0_idx, 1),
-            ("Top-Cam1", top_roi, cam1_idx, 2),
-            ("Bot-Cam1", bottom_roi, cam1_idx, 3),
-        ]:
-            if cam_idx >= C:
-                continue
-            # Extract: data is (Z, C, Y, X)
-            stack = data[:, cam_idx, roi[0], roi[1]]  # → (Z, crop_Y, crop_X)
-            if rotate_90:
-                stack = np.rot90(stack, k=1, axes=(1, 2))
-            out_ch = out_base + ch_offset
-            out_name = f"{base_name}_C{out_ch:02d}_T000.tif"
-            tifffile.imwrite(
-                crop_dir / out_name,
-                stack,
-                imagej=True,
-                metadata=tif_meta,
-            )
-            saved_count += 1
-
-    print(f"💾 Saved {saved_count} intermediate crops to {crop_dir}")
-
 
 @magic_factory(
     call_button="🚀 Crop -> (Decon) -> Deskew",
@@ -245,18 +227,24 @@ def petakit_pipeline(
     shapes_layer: "napari.layers.Shapes",
     z_step_um: float = 0.1,
     xy_pixel_size: float = 0.136,
-    sheet_angle_deg: float = 30.0,
+    sheet_angle_deg: float = 60.0,
     output_format: str = "tiff-series",
-    rotate_90: bool = True,
-    save_intermediates: bool = True,
-    objective_scan: bool = False,
-    z_stage_scan: bool = False,
-    reverse: bool = True,
     run_decon: bool = True,
-    psf_path: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/Master_PSF_Final_Strict.tif"),
+    exposure_mode: typing.Literal["Single Exposure (All Lasers)", "Sequential Series"] = "Single Exposure (All Lasers)",
+    psf_gfp: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif"),
+    psf_calcein_violet: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif"),
+    psf_mscarlet: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif"),
+    psf_cf647: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif"),
+    psf_master: Path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif"),
     decon_iters: int = 10,
+    use_omw: bool = False,
 ):
     """Parses visual ROIs, enforces matching sizes, and chains crop+deskew jobs."""
+    rotate_90 = True
+    reverse = True
+    objective_scan = False
+    z_stage_scan = False
+    
     source_path = image_layer.source.path
     if not source_path:
         source_path = image_layer.metadata.get("path")
@@ -266,9 +254,9 @@ def petakit_pipeline(
         return
     base_file = Path(source_path)
 
-    if len(shapes_layer.data) != 2:
+    if len(shapes_layer.data) not in [1, 2]:
         print(
-            f"❌ Error: Please draw exactly 2 rectangles (Top and Bottom). "
+            f"❌ Error: Please draw exactly 1 or 2 rectangles. "
             f"You have {len(shapes_layer.data)}."
         )
         return
@@ -292,11 +280,19 @@ def petakit_pipeline(
             }
         )
 
-    rois.sort(key=lambda r: r["y_center"])
-    top = rois[0]
-    bot = rois[1]
-
     max_y, max_x = image_layer.data.shape[-2:]
+
+    top = None
+    bot = None
+    if len(rois) == 1:
+        if rois[0]["y_center"] < max_y / 2:
+            top = rois[0]
+        else:
+            bot = rois[0]
+    else:
+        rois.sort(key=lambda r: r["y_center"])
+        top = rois[0]
+        bot = rois[1]
 
     def _clamp_to_bounds(roi: dict, max_y: int, max_x: int) -> dict:
         """Safely clamp ROI coordinates to image bounds, preventing zero-area crops."""
@@ -306,32 +302,36 @@ def petakit_pipeline(
         roi["xmax"] = max(roi["xmin"] + 1, min(roi["xmax"], max_x))
         return roi
 
-    # 1. Clamp top ROI first (it defines the target crop size)
-    top = _clamp_to_bounds(top, max_y, max_x)
-    height = top["ymax"] - top["ymin"]
-    width = top["xmax"] - top["xmin"]
+    top_roi = None
+    bottom_roi = None
+    height = 0
+    width = 0
 
-    # 2. Enforce same size on bottom ROI
-    bot["ymax"] = bot["ymin"] + height
-    bot["xmax"] = bot["xmin"] + width
-    
-    # 3. Clamp bottom ROI to prevent out-of-bounds overflow
-    bot = _clamp_to_bounds(bot, max_y, max_x)
+    if top:
+        top = _clamp_to_bounds(top, max_y, max_x)
+        height = top["ymax"] - top["ymin"]
+        width = top["xmax"] - top["xmin"]
+        top_roi = (slice(top["ymin"], top["ymax"]), slice(top["xmin"], top["xmax"]))
 
-    top_roi = (slice(top["ymin"], top["ymax"]), slice(top["xmin"], top["xmax"]))
-    bottom_roi = (slice(bot["ymin"], bot["ymax"]), slice(bot["xmin"], bot["xmax"]))
-
-    # Update the shapes layer to reflect the clamped bottom ROI
     new_shapes = list(shapes_layer.data)
-    new_bot_coords = np.array(
-        [
+    
+    if bot:
+        # Enforce same size as top ROI if both exist, otherwise take bot's drawn size
+        if top:
+            bot["ymax"] = bot["ymin"] + height
+            bot["xmax"] = bot["xmin"] + width
+            
+        bot = _clamp_to_bounds(bot, max_y, max_x)
+        bottom_roi = (slice(bot["ymin"], bot["ymax"]), slice(bot["xmin"], bot["xmax"]))
+
+        new_bot_coords = np.array([
             [bot["ymin"], bot["xmin"]],
-            [bot["ymax"], bot["xmin"]],
-            [bot["ymax"], bot["xmax"]],
             [bot["ymin"], bot["xmax"]],
-        ]
-    )
-    new_shapes[bot["index"]] = new_bot_coords
+            [bot["ymax"], bot["xmax"]],
+            [bot["ymax"], bot["xmin"]],
+        ])
+        new_shapes[bot["index"]] = new_bot_coords
+
     shapes_layer.data = new_shapes
 
     # 🔍 Metadata check & warning
@@ -344,14 +344,10 @@ def petakit_pipeline(
         print("⚠️  Could not read z-step from metadata. Using widget value.")
 
     print(f"📁 Target: {base_file.name}")
-    print(
-        f"   Top ROI:    Y[{top_roi[0].start}:{top_roi[0].stop}], "
-        f"X[{top_roi[1].start}:{top_roi[1].stop}]"
-    )
-    print(
-        f"   Bottom ROI: Y[{bottom_roi[0].start}:{bottom_roi[0].stop}], "
-        f"X[{bottom_roi[1].start}:{bottom_roi[1].stop}]"
-    )
+    if top_roi:
+        print(f"   Top ROI:    Y[{top_roi[0].start}:{top_roi[0].stop}], X[{top_roi[1].start}:{top_roi[1].stop}]")
+    if bottom_roi:
+        print(f"   Bottom ROI: Y[{bottom_roi[0].start}:{bottom_roi[0].stop}], X[{bottom_roi[1].start}:{bottom_roi[1].stop}]")
 
     # Derive output directory name
     folder_name = base_file.name
@@ -366,22 +362,21 @@ def petakit_pipeline(
         
     output_dir = base_file.parent / folder_name
 
-    # Save intermediate crops for diagnostic inspection (before HPC job)
-    if save_intermediates:
-        try:
-            _save_intermediate_crops(
-                image_data=image_layer.data,
-                top_roi=top_roi,
-                bottom_roi=bottom_roi,
-                output_dir=output_dir,
-                base_name=folder_name,
-                rotate_90=rotate_90,
-            )
-        except Exception as e:
-            print(f"⚠️  Could not save intermediates: {e}")
+
 
     t0_only = image_layer.metadata.get("t0_only", False)
     target_timepoints = [1] if t0_only else None
+
+    active_channels = []
+    try:
+        # If the widget exists globally, read from it directly
+        if pipeline_widget.save_gfp.value: active_channels.append("GFP")
+        if pipeline_widget.save_calcein_violet.value: active_channels.append("Calcein_Violet")
+        if pipeline_widget.save_mscarlet.value: active_channels.append("mScarlet")
+        if pipeline_widget.save_cf647.value: active_channels.append("CF647")
+    except NameError:
+        # Fallback if run outside of __main__
+        active_channels = ["GFP", "Calcein_Violet", "mScarlet", "CF647"]
 
     try:
         crop_job_ticket = submit_remote_crop_job(
@@ -395,7 +390,17 @@ def petakit_pipeline(
             z_step_um=z_step_um,
             xy_pixel_size=xy_pixel_size,
             test_mode=t0_only,
+            exposure_mode=exposure_mode,
+            active_channels=active_channels,
         )
+
+        psf_paths_dict = {
+            "GFP": psf_gfp,
+            "Calcein_Violet": psf_calcein_violet,
+            "mScarlet": psf_mscarlet,
+            "CF647": psf_cf647,
+            "Master": psf_master,
+        }
 
         worker = _run_job_chain(
             crop_job_path=crop_job_ticket,
@@ -407,9 +412,11 @@ def petakit_pipeline(
             z_stage_scan=z_stage_scan,
             reverse=reverse,
             run_decon=run_decon,
-            psf_path=psf_path,
+            psf_paths=psf_paths_dict,
             decon_iters=decon_iters,
+            use_omw=use_omw,
             gpu_decon=True,
+            active_channels=active_channels,
         )
         worker.start()
 
@@ -437,12 +444,41 @@ if __name__ == "__main__":
         name="Crop ROIs", edge_color="red", face_color="transparent", edge_width=5
     )
 
-    viewer.window.add_dock_widget(
-        petakit_pipeline(), name="Opym PetaKit", area="right"
-    )
+    # Instantiate the pipeline widget globally so the function can access its custom layout values
+    global pipeline_widget
+    pipeline_widget = petakit_pipeline()
+    
+    # Create the checkboxes manually since we removed them from the function signature
+    from magicgui.widgets import Container, CheckBox, Label
+    save_gfp = CheckBox(value=True, name="save_gfp", text="save gfp")
+    save_calcein_violet = CheckBox(value=True, name="save_calcein_violet", text="save calcein violet")
+    save_mscarlet = CheckBox(value=True, name="save_mscarlet", text="save mscarlet")
+    save_cf647 = CheckBox(value=True, name="save_cf647", text="save cf647")
+    
+    # Attach them to the widget object so the function can find them
+    pipeline_widget.save_gfp = save_gfp
+    pipeline_widget.save_calcein_violet = save_calcein_violet
+    pipeline_widget.save_mscarlet = save_mscarlet
+    pipeline_widget.save_cf647 = save_cf647
+    
+    # Restructure save boxes into a 2x2 grid
+    space_1 = Label(value="    ")
+    space_2 = Label(value="    ")
+    
+    save_row_1 = Container(layout="horizontal", widgets=[save_gfp, space_1, save_calcein_violet], labels=False)
+    save_row_2 = Container(layout="horizontal", widgets=[save_mscarlet, space_2, save_cf647], labels=False)
+    save_grid = Container(layout="vertical", widgets=[save_row_1, save_row_2], labels=False)
+    
+    # Insert the grid before the PSF path widgets
+    idx = pipeline_widget.index(pipeline_widget.psf_gfp)
+    pipeline_widget.insert(idx, save_grid)
 
     viewer.window.add_dock_widget(
         load_lazy_ome_tiff(), name="OME-TIFF Loader", area="right"
+    )
+
+    viewer.window.add_dock_widget(
+        pipeline_widget, name="Opym PetaKit", area="right"
     )
 
     napari.run()
