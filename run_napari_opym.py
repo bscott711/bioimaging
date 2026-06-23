@@ -101,6 +101,113 @@ def _trim_tiff_files(output_dir: Path):
     print(f"✅ Successfully cropped the coverslip reflection and saved copies to {crop_dir}")
     return start_trim
 
+
+def _auto_detect_rois(image_layer) -> list[np.ndarray]:
+    """Auto-detects the biological sample ROI from the top and bottom halves."""
+    import scipy.ndimage
+    import skimage.measure
+    
+    print("\n🔍 Auto-detecting ROIs from data...")
+    # Get T=0 data. For lazy dask arrays, .compute() pulls just that timepoint
+    t0_data = image_layer.data[0] if hasattr(image_layer.data, "compute") else image_layer.data[0]
+    if hasattr(t0_data, "compute"):
+        print("   (Fetching T=0 chunk from Zarr...)")
+        t0_data = t0_data.compute()
+        
+    print("   Projecting over Z and Channels...")
+    # Max project over Z (axis 0) and Channels (axis 1) if dimensions match TZCYX
+    if t0_data.ndim >= 3:
+        # Assuming (Z, C, Y, X) or (Z, Y, X)
+        proj_axes = tuple(range(t0_data.ndim - 2))
+        max_proj = np.max(t0_data, axis=proj_axes)
+    else:
+        max_proj = t0_data
+        
+    max_y, max_x = max_proj.shape
+    half_y = max_y // 2
+    
+    def _find_half_roi(image_half, offset_y=0):
+        smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=5)
+        thresh = np.mean(smoothed) + 2 * np.std(smoothed)
+        mask = smoothed > thresh
+        
+        labels = skimage.measure.label(mask)
+        props = skimage.measure.regionprops(labels)
+        
+        if not props:
+            return None
+            
+        min_row, min_col, max_row, max_col = image_half.shape[0], image_half.shape[1], 0, 0
+        found = False
+        
+        for p in props:
+            if p.area > 500: # Ignore tiny hot pixel clusters
+                r0, c0, r1, c1 = p.bbox
+                min_row = min(min_row, r0)
+                min_col = min(min_col, c0)
+                max_row = max(max_row, r1)
+                max_col = max(max_col, c1)
+                found = True
+                
+        if not found:
+            return None
+            
+        # Add 50 pixel safety padding
+        pad = 50
+        min_row = max(0, min_row - pad)
+        min_col = max(0, min_col - pad)
+        max_row = min(image_half.shape[0], max_row + pad)
+        max_col = min(image_half.shape[1], max_col + pad)
+        
+        return {
+            "ymin": min_row + offset_y,
+            "ymax": max_row + offset_y,
+            "xmin": min_col,
+            "xmax": max_col
+        }
+
+    top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0)
+    bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y)
+    
+    # Unify bounding box sizes so Top and Bottom have the exact same dimensions.
+    # We take the maximum width and maximum height across both detections.
+    valid_rois = [r for r in [top_roi_dict, bot_roi_dict] if r is not None]
+    shapes = []
+    
+    if valid_rois:
+        max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
+        max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
+        
+        # Enforce minimum sizes just in case
+        max_h = max(max_h, 200)
+        max_w = max(max_w, 200)
+        
+        for r_dict in [top_roi_dict, bot_roi_dict]:
+            if r_dict is None:
+                continue
+                
+            # Extend upwards instead of centering
+            new_ymax = r_dict["ymax"]
+            new_ymin = max(0, new_ymax - max_h)
+            
+            x_center = (r_dict["xmin"] + r_dict["xmax"]) // 2
+            new_xmin = max(0, x_center - max_w // 2)
+            new_xmax = min(max_x, x_center + max_w // 2)
+            
+            print(f"   Unified ROI: Y[{new_ymin}:{new_ymax}], X[{new_xmin}:{new_xmax}]")
+            coords = np.array([
+                [new_ymin, new_xmin],
+                [new_ymin, new_xmax],
+                [new_ymax, new_xmax],
+                [new_ymax, new_xmin],
+            ])
+            shapes.append(coords)
+            
+    if not shapes:
+        print("❌ Could not detect any valid structures above background noise!")
+        
+    return shapes
+
 @thread_worker
 def _run_job_chain(
     crop_job_path: Path,
@@ -347,6 +454,16 @@ def petakit_pipeline(
             f"You have {len(shapes_layer.data)}."
         )
         return
+
+    # 🔍 Auto-Detect ROIs if none are drawn
+    if len(shapes_layer.data) == 0:
+        detected_shapes = _auto_detect_rois(image_layer)
+        if detected_shapes:
+            shapes_layer.data = detected_shapes
+            print("✏️  Drew auto-detected ROIs onto the Napari shapes layer.")
+        else:
+            print("⚠️  No ROIs drawn and auto-detection failed. Exiting.")
+            return
 
     rois = []
     for i, shape_coords in enumerate(shapes_layer.data):
