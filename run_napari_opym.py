@@ -15,6 +15,7 @@ from opym.petakit import (
     submit_remote_crop_job,
     submit_remote_deskew_job,
     submit_remote_decon_job,
+    submit_pipeline_job,
     wait_for_job,
 )
 
@@ -171,13 +172,8 @@ def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.nd
         if not found:
             return None
             
-        # Add 50 pixel safety padding
-        pad = 50
-        min_row = max(0, min_row - pad)
-        min_col = max(0, min_col - pad)
-        max_row = min(image_half.shape[0], max_row + pad)
-        max_col = min(image_half.shape[1], max_col + pad)
-        
+        # We don't add massive padding here, we just return the tight bounding box of the signal.
+        # The unifying step will expand this to the full optical FOV.
         return {
             "ymin": min_row + offset_y,
             "ymax": max_row + offset_y,
@@ -189,7 +185,7 @@ def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.nd
     bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y) if needs_bot else None
     
     # Unify bounding box sizes so Top and Bottom have the exact same dimensions.
-    # We take the maximum width and maximum height across both detections.
+    # We take the center of the detected signal, and expand it to capture the full optical FOV.
     valid_rois = [r for r in [top_roi_dict, bot_roi_dict] if r is not None]
     shapes = []
     
@@ -197,23 +193,15 @@ def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.nd
         detected_max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
         detected_max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
         
-        # 🛡️ Guardrails: The cell ROIs should typically be around 600x900
-        EXPECTED_H = 600
-        EXPECTED_W = 900
+        # The full illuminated optical FOV. 
+        # Using 576x1152 (18x32 blocks of 64) for mathematically optimal CUDA/FFT performance!
+        EXPECTED_H = 576
+        EXPECTED_W = 1152
         
-        if detected_max_h < 250 or detected_max_h > 1000:
-            print(f"⚠️  Detected ROI Height ({detected_max_h}) is outside normal biological bounds. Clamping to {EXPECTED_H}.")
-            detected_max_h = EXPECTED_H
-            
-        if detected_max_w < 400 or detected_max_w > 1800:
-            print(f"⚠️  Detected ROI Width ({detected_max_w}) is outside normal biological bounds. Clamping to {EXPECTED_W}.")
-            detected_max_w = EXPECTED_W
+        # Enforce that our box is AT LEAST the expected optical FOV size
+        max_h = max(detected_max_h, EXPECTED_H)
+        max_w = max(detected_max_w, EXPECTED_W)
         
-        # Enforce minimum sizes and blend with master.json if it existed
-        max_h = max(detected_max_h, master_h)
-        max_w = max(detected_max_w, master_w)
-        
-        # Save back the new maximums to ensure future images match
         if master_roi_path:
             try:
                 with open(master_roi_path, 'w') as f:
@@ -225,15 +213,23 @@ def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.nd
             if r_dict is None:
                 continue
                 
-            # Extend upwards instead of centering
-            new_ymax = r_dict["ymax"]
-            new_ymin = max(0, new_ymax - max_h)
-            
+            # Find the center of the detected signal
+            y_center = (r_dict["ymin"] + r_dict["ymax"]) // 2
             x_center = (r_dict["xmin"] + r_dict["xmax"]) // 2
-            new_xmin = max(0, x_center - max_w // 2)
-            new_xmax = min(max_x, x_center + max_w // 2)
             
-            print(f"   Unified ROI: Y[{new_ymin}:{new_ymax}], X[{new_xmin}:{new_xmax}]")
+            # Expand outwards from the center to capture the full optical FOV
+            new_ymin = max(0, y_center - max_h // 2)
+            new_ymax = new_ymin + max_h
+            
+            new_xmin = max(0, x_center - max_w // 2)
+            new_xmax = min(max_x, new_xmin + max_w)
+            
+            # If expanding pushed us past the right edge, shift back left
+            if new_xmax > max_x:
+                new_xmax = max_x
+                new_xmin = max(0, new_xmax - max_w)
+                
+            print(f"   Optical FOV ROI: Y[{new_ymin}:{new_ymax}], X[{new_xmin}:{new_xmax}]")
             coords = np.array([
                 [new_ymin, new_xmin],
                 [new_ymin, new_xmax],
@@ -248,203 +244,240 @@ def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.nd
     return shapes
 
 @thread_worker
-def _run_job_chain(
-    crop_job_path: Path,
+def _run_unified_job_chain(
+    base_file: Path,
     output_dir: Path,
+    top_roi: tuple | None,
+    bottom_roi: tuple | None,
     z_step_um: float = 0.1,
-    rotate_90: bool = True,
     sheet_angle_deg: float = 60.0,
-    objective_scan: bool = False,
-    z_stage_scan: bool = False,
-    reverse: bool = True,
-    run_decon: bool = True,
-    auto_trim_coverslip: bool = True,
     psf_paths: dict | None = None,
     decon_iters: int = 10,
-    use_omw: bool = False,
-    gpu_decon: bool = True,
     active_channels: list[str] | None = None,
     processing_metadata: dict | None = None,
+    master_roi_path: Path | None = None,
 ):
-    """Waits for jobs to finish with a live console timer, then chains them."""
-    job_name = crop_job_path.name
-    base_dir = crop_job_path.parent.parent  # Resolves to ~/petakit_jobs
-    done_path = base_dir / "completed" / job_name
-    fail_path = base_dir / "failed" / job_name
-
-    print(f"\n🚀 Crop job submitted to HPC queue: {job_name}")
+    """Extracts chunks from Zarr and submits them to the unified PetaKit GPU pipeline."""
+    import tifffile
+    import zarr
+    import time
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
     
-    start_time = time.time()
-    success = False
+    print(f"\n🚀 Initializing Unified GPU Pipeline for {base_file}")
     
-    # 1. Custom live-updating polling loop for the Crop Job
-    while True:
-        elapsed = int(time.time() - start_time)
+    store = tifffile.imread(str(base_file), aszarr=True)
+    z = zarr.open(store, mode='r')
+    
+    num_t = z.shape[0]
+    timepoints_to_run = target_timepoints if target_timepoints is not None else range(num_t)
+    
+    if len(z.shape) == 5:
+        if z.shape[1] < z.shape[2]:
+            num_c = z.shape[1]
+            c_axis = 1
+        else:
+            num_c = z.shape[2]
+            c_axis = 2
+    else:
+        num_c = 1
+        c_axis = 1
         
-        if done_path.exists():
-            sys.stdout.write(f"\r✅ Crop job completed in {elapsed}s!{' ' * 20}\n")
-            sys.stdout.flush()
-            success = True
-            break
-        elif fail_path.exists():
-            sys.stdout.write(f"\r❌ Crop job failed after {elapsed}s!{' ' * 20}\n")
-            sys.stdout.flush()
-            success = False
-            break
+    print(f"Detected Zarr shape: {z.shape}. C={num_c}. Extracting timepoints: {list(timepoints_to_run)}...")
+    
+    def process_chunk_wrapper(t, c, is_top, roi, z_crop_end=None):
+        roi_name = "top" if is_top else "bot"
+        shm_path = Path(f"/dev/shm/opym_jobs/{base_file.stem}_T{t:04d}_C{c}_{roi_name}.tif")
+        out_sub_dir = output_dir / ("Top" if is_top else "Bot")
         
-        # Live ticking timer that overwrites its own line
-        sys.stdout.write(f"\r⏱️  Crop Elapsed: {elapsed}s | Status: MATLAB is processing...{' ' * 5}")
-        sys.stdout.flush()
-        time.sleep(2)
+        shm_dir = Path("/dev/shm/opym_jobs")
+        while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 100:
+            time.sleep(1)
+            
+        if z.ndim == 5:
+            if c_axis == 1:
+                cropped = z[t, c, :, roi[0], roi[1]]
+            else:
+                cropped = z[t, :, c, roi[0], roi[1]]
+        else:
+            return
 
-    if success:
-        deskew_input = output_dir
-
-        if run_decon:
-            print("\n🚀 Submitting parallel Decon jobs to PetaKit...")
-            emissions = {
-                "GFP": 525,
-                "Calcein_Violet": 450,
-                "mScarlet": 595,
-                "CF647": 670,
-            }
+        shm_path.parent.mkdir(exist_ok=True, parents=True)
+        tifffile.imwrite(shm_path, np.array(cropped), imagej=True)
+        
+        out_sub_dir.mkdir(exist_ok=True, parents=True)
+        output_file = out_sub_dir / shm_path.name
+        
+        chan_names = ["GFP", "Calcein_Violet", "mScarlet", "CF647"]
+        c_name = chan_names[c] if c < len(chan_names) else "Master"
+        if active_channels and c < len(active_channels):
+            c_name = active_channels[c]
             
-            if active_channels:
-                emissions = {k: v for k, v in emissions.items() if k in active_channels}
+        psf_file = psf_paths.get(c_name) if psf_paths else None
+        if not psf_file and psf_paths:
+            psf_file = psf_paths.get("Master")
             
-            decon_tickets = []
-            
-            for name, wvl in emissions.items():
-                if list(output_dir.glob(f"*{name}*.tif")):
-                    psf_file = psf_paths.get(name) if psf_paths else Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif")
-                    channel_pattern = f"{output_dir.name}_{name}"
-                    ticket = submit_remote_decon_job(
-                        input_target=output_dir,
-                        psf_paths=psf_file,
-                        iterations=decon_iters,
-                        gpu_job=gpu_decon,
-                        skewed=True,
-                        result_dir_name="Decon",
-                        channel_patterns=[channel_pattern],
-                        rl_method="omw" if use_omw else "simplified",
-                    )
-                    decon_tickets.append(ticket)
-            
-            if not decon_tickets:
-                master_psf = psf_paths.get("Master") if psf_paths else None
-                if master_psf:
-                    print("⚠️ No output crops found matching known emission wavelengths. Falling back to single master job...")
-                    ticket = submit_remote_decon_job(
-                        input_target=output_dir,
-                        psf_paths=master_psf,
-                        iterations=decon_iters,
-                        gpu_job=gpu_decon,
-                        skewed=True,
-                        result_dir_name="Decon",
-                        channel_patterns=[output_dir.name],
-                        rl_method="omw" if use_omw else "simplified",
-                    )
-                    decon_tickets.append(ticket)
-            
-            print(f"🚀 Dispatched {len(decon_tickets)} Decon jobs concurrently!")
-            
-            d_start = time.time()
-            decon_success = False
-            
-            while True:
-                d_elapsed = int(time.time() - d_start)
-                completed_count = 0
-                failed_count = 0
-                
-                for t in decon_tickets:
-                    if (base_dir / "completed" / t.name).exists():
-                        completed_count += 1
-                    elif (base_dir / "failed" / t.name).exists():
-                        failed_count += 1
-                
-                if failed_count > 0:
-                    sys.stdout.write(f"\r❌ Decon jobs failed after {d_elapsed}s!{' ' * 20}\n")
-                    sys.stdout.flush()
-                    break
-                elif completed_count == len(decon_tickets) and len(decon_tickets) > 0:
-                    sys.stdout.write(f"\r✅ All Decon jobs completed in {d_elapsed}s!{' ' * 20}\n")
-                    sys.stdout.flush()
-                    decon_success = True
-                    break
-                
-                sys.stdout.write(f"\r⏱️  Decon Elapsed: {d_elapsed}s | Status: {completed_count}/{len(decon_tickets)} completed...{' ' * 5}")
-                sys.stdout.flush()
-                time.sleep(2)
-
-            if not decon_success:
-                print("\n❌ Decon job failed. Aborting deskew submission.")
-                return
-            
-            deskew_input = output_dir / "Decon"
-
-        print("\n🚀 Submitting Deskew job to PetaKit...")
-        deskew_ticket = submit_remote_deskew_job(
-            input_target=deskew_input,
+        ticket = submit_pipeline_job(
+            output_file=output_file,
+            shm_path=shm_path,
+            psf_paths=[str(psf_file)] if psf_file else [],
             z_step_um=z_step_um,
+            iterations=decon_iters,
             sheet_angle_deg=sheet_angle_deg,
-            deskew=True,
-            rotate=True,
-            objective_scan=objective_scan,
-            z_stage_scan=z_stage_scan,
-            reverse=reverse,
-            gpu_decon=gpu_decon,
-            crop_was_rotated=rotate_90,
-            psf_path=None,
-            n_iters=None,
-            channel_patterns=[output_dir.name],
+            interp_method="linear",
+            z_crop_end=z_crop_end,
         )
-        print(f"✅ Deskew job successfully queued: {deskew_ticket.name}")
+        return ticket
         
-        # 2. Add a live timer for the Deskew Job too!
-        d_name = deskew_ticket.name
-        d_done = base_dir / "completed" / d_name
-        d_fail = base_dir / "failed" / d_name
-        
+    def _wait_for_tickets(tickets_list, phase_name="chunks"):
+        import sys
+        base_dir = Path("~/petakit_jobs").expanduser()
         d_start = time.time()
         while True:
             d_elapsed = int(time.time() - d_start)
-            if d_done.exists():
-                sys.stdout.write(f"\r✅ Deskew job completed in {d_elapsed}s!{' ' * 20}\n")
+            completed_count = 0
+            failed_count = 0
+            for tk in tickets_list:
+                if (base_dir / "completed" / tk.name).exists():
+                    completed_count += 1
+                elif (base_dir / "failed" / tk.name).exists():
+                    failed_count += 1
+            if failed_count > 0:
+                sys.stdout.write(f"\r❌ {phase_name} failed after {d_elapsed}s!{' ' * 20}\n")
                 sys.stdout.flush()
-                
-                if auto_trim_coverslip:
-                    print("\n✂️ Auto-Trimming coverslip artifact from final Deskewed TIFs...")
-                    dsr_dir = deskew_input / "DSR"
-                    if dsr_dir.exists():
-                        start_trim = _trim_tiff_files(dsr_dir)
-                        if processing_metadata and start_trim is not None:
-                            processing_metadata["final_z_crop_start"] = 0
-                            processing_metadata["final_z_crop_end"] = start_trim
-                    else:
-                        print(f"⚠️ DSR directory not found at {dsr_dir}. Skipping trim.")
-                        
-                if processing_metadata:
-                    import json
-                    target_dir = (deskew_input / "DSR" / "CROP") if auto_trim_coverslip else (deskew_input / "DSR")
-                    if not target_dir.exists():
-                        target_dir.mkdir(parents=True, exist_ok=True)
-                    with open(target_dir / "processing_metadata.json", "w") as f:
-                        json.dump(processing_metadata, f, indent=4)
-                    print(f"✅ Saved sidecar processing metadata to {target_dir / 'processing_metadata.json'}")
-                break
-            elif d_fail.exists():
-                sys.stdout.write(f"\r❌ Deskew job failed after {d_elapsed}s!{' ' * 20}\n")
+                return False
+            elif completed_count == len(tickets_list) and len(tickets_list) > 0:
+                sys.stdout.write(f"\r✅ All {len(tickets_list)} {phase_name} completed in {d_elapsed}s!{' ' * 20}\n")
                 sys.stdout.flush()
-                break
-            
-            # Live ticking timer for the GPUs
-            sys.stdout.write(f"\r⏱️  Deskew Elapsed: {d_elapsed}s | Status: GPUs are crunching...{' ' * 5}")
+                return True
+            sys.stdout.write(f"\r⏱️  {phase_name.capitalize()} Elapsed: {d_elapsed}s | Status: {completed_count}/{len(tickets_list)} completed...{' ' * 5}")
             sys.stdout.flush()
             time.sleep(2)
             
+    # Look for existing z_trim in master_roi.json
+    start_trim = None
+    master_dict = {}
+    if master_roi_path and master_roi_path.exists():
+        try:
+            with open(master_roi_path, 'r') as f:
+                master_dict = json.load(f)
+                if "z_crop_end" in master_dict:
+                    start_trim = master_dict["z_crop_end"]
+                    print(f"   📂 Loaded previous unified Z-Trim from master_roi.json (Z=0 to Z={start_trim})")
+        except Exception as e:
+            print(f"⚠️ Could not parse master_roi.json: {e}")
+            
+    # PHASE 1: Process the first timepoint on the PRIMARY channel to determine Z-trim
+    t_zero = timepoints_to_run[0]
+    
+    if start_trim is None:
+        # Find primary channel for calibration (fuzzy match 'gfp', 'mng')
+        primary_c = 0
+        if active_channels:
+            for i, ch in enumerate(active_channels):
+                cl = ch.lower()
+                if 'gfp' in cl or 'mng' in cl or 'gpf' in cl:
+                    primary_c = i
+                    break
+        else:
+            # Fallback if active_channels not provided
+            chan_names = ["GFP", "Calcein_Violet", "mScarlet", "CF647"]
+            for i, ch in enumerate(chan_names):
+                if i >= num_c: break
+                cl = ch.lower()
+                if 'gfp' in cl or 'mng' in cl or 'gpf' in cl:
+                    primary_c = i
+                    break
+                    
+        print(f"   🔍 Selected Channel {primary_c} as primary calibrator for Z-trim.")
+                    
+        t0_tickets = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            if top_roi: futures.append(executor.submit(process_chunk_wrapper, t_zero, primary_c, True, top_roi, None))
+            if bottom_roi: futures.append(executor.submit(process_chunk_wrapper, t_zero, primary_c, False, bottom_roi, None))
+            for f in futures:
+                res = f.result()
+                if res: t0_tickets.append(res)
+                
+        print(f"\n🚀 Submitted T={t_zero} (Channel {primary_c}) to determine unified Z-trim...")
+        if not _wait_for_tickets(t0_tickets, phase_name=f"T={t_zero} calibrator chunks"):
+            return
+            
+        # Determine the Z-trim based on T=0 output
+        print("\n✂️ Auto-Trimming coverslip artifact on T=0 calibrator...")
+        if (output_dir / "Top").exists():
+            st1 = _trim_tiff_files(output_dir / "Top")
+            if st1 is not None: start_trim = st1
+        if (output_dir / "Bot").exists():
+            st2 = _trim_tiff_files(output_dir / "Bot")
+            if st2 is not None and (start_trim is None or st2 < start_trim): 
+                start_trim = st2
+                
+        if start_trim is not None:
+            print(f"✅ Unified Z-Trim established: Z=0 to Z={start_trim}. Applying to all remaining timepoints!")
+            if master_roi_path:
+                master_dict["z_crop_end"] = start_trim
+                try:
+                    with open(master_roi_path, 'w') as f:
+                        json.dump(master_dict, f)
+                    print(f"✅ Saved z_crop_end to {master_roi_path}")
+                except Exception as e:
+                    print(f"⚠️ Could not save to master_roi.json: {e}")
+        else:
+            print("⚠️ Could not detect coverslip on T=0. Proceeding without unified Z-trim.")
+            
+    if processing_metadata and start_trim is not None:
+        processing_metadata["final_z_crop_start"] = 0
+        processing_metadata["final_z_crop_end"] = start_trim
+        
+    # PHASE 2: Process the rest of the timepoints using the unified Z-trim!
+    if start_trim is not None:
+        # If we pulled start_trim from the JSON, we STILL need to process T=0 because it was skipped!
+        # If we calculated start_trim, T=0 is already done, but it was NOT trimmed in MATLAB, only in Python via _trim_tiff_files.
+        # Actually _trim_tiff_files wrote the trimmed versions to the "CROP" subdirectory.
+        # To make it uniform and avoid the "CROP" subdirectory completely, we should re-run T=0 through MATLAB with the new start_trim!
+        # This guarantees every chunk is output natively from MATLAB in the main output_dir.
+        remaining_timepoints = timepoints_to_run
     else:
-        print("\n❌ Crop job failed. Aborting deskew submission.")
-        print(f"   Check logs at: {fail_path}.log")
+        # No trim was found at all. T=0 is in output_dir (untrimmed). We process the rest untrimmed.
+        remaining_timepoints = timepoints_to_run[1:]
+    if not remaining_timepoints:
+        print("\n✅ All requested timepoints have been processed!")
+        if processing_metadata:
+            import json
+            meta_dir = output_dir / "metadata"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            with open(meta_dir / "processing_metadata.json", "w") as f:
+                json.dump(processing_metadata, f, indent=4)
+        return
+        
+    tickets = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        for t in remaining_timepoints:
+            for c in range(num_c):
+                if top_roi:
+                    futures.append(executor.submit(process_chunk_wrapper, t, c, True, top_roi, start_trim))
+                if bottom_roi:
+                    futures.append(executor.submit(process_chunk_wrapper, t, c, False, bottom_roi, start_trim))
+        
+        for f in futures:
+            res = f.result()
+            if res:
+                tickets.append(res)
+            
+    print(f"\n🚀 {len(tickets)} remaining chunks extracted and submitted with Z-trim applied!")
+    _wait_for_tickets(tickets, phase_name="remaining chunks")
+        
+
+    if processing_metadata:
+        import json
+        meta_dir = output_dir / "metadata"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        with open(meta_dir / "processing_metadata.json", "w") as f:
+            json.dump(processing_metadata, f, indent=4)
 
 
 
@@ -627,61 +660,19 @@ def petakit_pipeline(
         # Fallback if run outside of __main__
         active_channels = ["GFP", "Calcein_Violet", "mScarlet", "CF647"]
 
-    try:
-        crop_job_ticket = submit_remote_crop_job(
+        worker = _run_unified_job_chain(
             base_file=base_file,
+            output_dir=output_dir,
             top_roi=top_roi,
             bottom_roi=bottom_roi,
-            channels=None,
-            timepoints=target_timepoints,
-            output_format=output_format,
-            rotate=rotate_90,
             z_step_um=z_step_um,
-            xy_pixel_size=xy_pixel_size,
-            test_mode=t0_only,
-            exposure_mode=exposure_mode,
-            active_channels=active_channels,
-        )
-
-        psf_paths_dict = {
-            "GFP": psf_gfp,
-            "Calcein_Violet": psf_calcein_violet,
-            "mScarlet": psf_mscarlet,
-            "CF647": psf_cf647,
-            "Master": psf_master,
-        }
-
-        processing_metadata = {
-            "source_file": str(base_file),
-            "xy_pixel_size": xy_pixel_size,
-            "z_step_um": z_step_um,
-            "sheet_angle_deg": sheet_angle_deg,
-            "exposure_mode": exposure_mode,
-            "rois": rois,
-            "active_channels": active_channels,
-            "run_decon": run_decon,
-            "decon_iters": decon_iters,
-            "use_omw": use_omw,
-            "psf_paths": {k: str(v) for k, v in psf_paths_dict.items()} if psf_paths_dict else None,
-        }
-
-        worker = _run_job_chain(
-            crop_job_path=crop_job_ticket,
-            output_dir=output_dir,
-            z_step_um=z_step_um,
-            rotate_90=rotate_90,
             sheet_angle_deg=sheet_angle_deg,
-            objective_scan=objective_scan,
-            z_stage_scan=z_stage_scan,
-            reverse=reverse,
-            run_decon=run_decon,
-            auto_trim_coverslip=auto_trim_coverslip,
             psf_paths=psf_paths_dict,
             decon_iters=decon_iters,
-            use_omw=use_omw,
-            gpu_decon=True,
             active_channels=active_channels,
             processing_metadata=processing_metadata,
+            target_timepoints=target_timepoints,
+            master_roi_path=master_roi_path,
         )
         worker.start()
 
@@ -912,7 +903,7 @@ if __name__ == "__main__":
             pipeline_widget.decon_iters.value = 25
 
     viewer.window.add_dock_widget(
-        load_lazy_ome_tiff(), name="OME-TIFF Loader", area="right"
+        load_lazy_ome_tiff(), name="OME-TIFF Loader", area="left"
     )
 
     viewer.window.add_dock_widget(
@@ -920,7 +911,7 @@ if __name__ == "__main__":
     )
 
     viewer.window.add_dock_widget(
-        trim_coverslip_reflection(), name="Trim Coverslip Artifact", area="right"
+        trim_coverslip_reflection(), name="Trim Coverslip Artifact", area="left"
     )
 
     napari.run()
