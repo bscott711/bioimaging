@@ -487,13 +487,6 @@ def petakit_pipeline(
         return
     base_file = Path(source_path)
 
-    if len(shapes_layer.data) not in [1, 2]:
-        print(
-            f"❌ Error: Please draw exactly 1 or 2 rectangles. "
-            f"You have {len(shapes_layer.data)}."
-        )
-        return
-
     # 🔍 Auto-Detect ROIs if none are drawn
     if len(shapes_layer.data) == 0:
         needs_top = pipeline_widget.save_gfp.value or pipeline_widget.save_mscarlet.value
@@ -506,6 +499,13 @@ def petakit_pipeline(
         else:
             print("⚠️  No ROIs drawn and auto-detection failed. Exiting.")
             return
+
+    if len(shapes_layer.data) not in [1, 2]:
+        print(
+            f"❌ Error: Please draw exactly 1 or 2 rectangles. "
+            f"You have {len(shapes_layer.data)}."
+        )
+        return
 
     rois = []
     for i, shape_coords in enumerate(shapes_layer.data):
