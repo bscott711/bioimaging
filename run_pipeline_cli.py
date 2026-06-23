@@ -9,6 +9,8 @@ import scipy.ndimage
 import skimage.measure
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import math
+import multiprocessing as mp
 
 import sys
 # Make sure we can import opym from local projects
@@ -48,6 +50,8 @@ def auto_detect_rois(z_array, master_roi_path=None):
     half_y = max_y // 2
     
     def _find_half_roi(image_half, offset_y=0):
+        if np.max(image_half) < 300:
+            return None
         smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=5)
         thresh = np.mean(smoothed) + 2 * np.std(smoothed)
         mask = smoothed > thresh
@@ -134,6 +138,103 @@ def get_z_step(target_path: Path):
             return float(d.get("stepSizeUm", 0.3))
     return 0.3
 
+def get_extraction_plan(target_path: Path):
+    from analyze_channels import analyze_directory, parse_name_for_fluorophores
+    base_dir = target_path.parent.parent
+    results = analyze_directory(str(base_dir))
+    folder_name = target_path.parent.name
+    
+    match = next((r for r in results if r["Folder"] == folder_name), None)
+    if not match: return []
+    
+    detected = match["Detected_Channels"]
+    if not detected:
+        detected = parse_name_for_fluorophores(base_dir.name)
+        
+    raw_configs = match["Raw_Configs"]
+    
+    has_488 = any("488" in c for c in detected)
+    has_405 = any("405" in c for c in detected)
+    has_561 = any("561" in c for c in detected)
+    has_640 = any("640" in c for c in detected)
+    
+    plan = []
+    
+    if len(raw_configs) <= 1:
+        if has_488: plan.append((0, True, "488nm"))
+        if has_405: plan.append((0, False, "405nm"))
+        if has_561: plan.append((1, True, "561nm"))
+        if has_640: plan.append((1, False, "640nm"))
+    else:
+        for i, config in enumerate(raw_configs):
+            config_lower = config.lower()
+            if "488" in config_lower: plan.append((i*2 + 0, True, "488nm"))
+            if "405" in config_lower: plan.append((i*2 + 0, False, "405nm"))
+            if "561" in config_lower: plan.append((i*2 + 1, True, "561nm"))
+            if "640" in config_lower: plan.append((i*2 + 1, False, "640nm"))
+            
+    return plan
+
+def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, data_dir, psf_path):
+    import tifffile
+    import zarr
+    import time
+    import numpy as np
+    from pathlib import Path
+    from opym.petakit import submit_pipeline_job
+    
+    # Each process MUST open its own independent file handle!
+    store = tifffile.imread(str(target_path), aszarr=True)
+    z = zarr.open(store, mode='r')
+    
+    for t in range(t_start, t_end):
+        for c, is_top, laser_name in extraction_plan:
+            roi = top_roi if is_top else bot_roi
+            if not roi: continue
+            
+            roi_name = "top" if is_top else "bot"
+            shm_path = Path(f"/dev/shm/opym_jobs/{target_path.stem}_T{t:04d}_C{c}_{roi_name}.tif")
+            
+            # Throttle so we don't fill up /dev/shm
+            shm_dir = Path("/dev/shm/opym_jobs")
+            while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 100:
+                time.sleep(1)
+                
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Extracting {laser_name}...")
+            st = time.time()
+            
+            # Correctly slice the dimensions to yield (Z, Y, X)
+            if z.ndim == 5:
+                if c_axis == 1:
+                    cropped = z[t, c, :, roi[0], roi[1]]
+                else:
+                    cropped = z[t, :, c, roi[0], roi[1]]
+            else:
+                return
+
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
+                
+            shm_path.parent.mkdir(exist_ok=True, parents=True)
+            cropped_mem = np.array(cropped)
+            
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Writing to {shm_path}...")
+            st2 = time.time()
+            tifffile.imwrite(shm_path, cropped_mem, imagej=True)
+            
+            output_dir = data_dir.parent / "cell_1_FAST" / ("Top" if is_top else "Bot")
+            output_dir.mkdir(exist_ok=True, parents=True)
+            output_file = output_dir / shm_path.name
+            
+            submit_pipeline_job(
+                output_file=output_file,
+                shm_path=shm_path,
+                psf_paths=[psf_path],
+                z_step_um=z_step_um,
+                iterations=10,
+            )
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Written in {time.time()-st2:.2f}s")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Job Submitted!")
+
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
     parser.add_argument("data_path", type=str, help="Path to the directory containing the ome.tif file")
@@ -177,62 +278,42 @@ def main():
         num_c = 1
         c_axis = 1
         
-    print(f"Detected Zarr shape: {z.shape}. T={num_t}, C={num_c}. Extracting all timepoints...")
-    
-    def process_chunk_wrapper(t, c, is_top, roi):
-        roi_name = "top" if is_top else "bot"
-        shm_path = Path(f"/dev/shm/opym_jobs/{target_path.stem}_T{t:04d}_C{c}_{roi_name}.tif")
-        output_dir = data_dir / ("Top" if is_top else "Bot")
-        
-        # Throttle so we don't fill up /dev/shm
-        shm_dir = Path("/dev/shm/opym_jobs")
-        while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 100:
-            time.sleep(1)
-            
-        print(f"[{t}:{c}:{roi_name}] Extracting ROI from Zarr...")
-        st = time.time()
-        
-        # Correctly slice the dimensions to yield (Z, Y, X)
-        if z.ndim == 5:
-            if c_axis == 1:
-                cropped = z[t, c, :, roi[0], roi[1]]
-            else:
-                cropped = z[t, :, c, roi[0], roi[1]]
-        else:
-            print("Unexpected dimensions. Skipping.")
-            return
-
-        print(f"[{t}:{c}:{roi_name}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
-        
-        shm_path.parent.mkdir(exist_ok=True, parents=True)
-        cropped_mem = np.array(cropped)
-        
-        print(f"[{t}:{c}:{roi_name}] Writing to {shm_path}...")
-        st2 = time.time()
-        tifffile.imwrite(shm_path, cropped_mem, imagej=True)
-        print(f"[{t}:{c}:{roi_name}] Written in {time.time()-st2:.2f}s")
-        
-        output_dir = data_dir.parent / "cell_1_FAST" / ("Top" if is_top else "Bot")
-        output_dir.mkdir(exist_ok=True, parents=True)
-        output_file = output_dir / shm_path.name
-        
-        submit_pipeline_job(
-            output_file=output_file,
-            shm_path=shm_path,
-            psf_paths=[args.psf],
-            z_step_um=z_step_um,
-            iterations=10,
-        )
-        print(f"[{t}:{c}:{roi_name}] Job Submitted!")
-        
-    print("Starting sequential extraction for maximum GPFS throughput...")
-    for t in range(num_t):
+    extraction_plan = get_extraction_plan(target_path)
+    if not extraction_plan:
+        print("⚠️ Warning: Could not generate extraction plan from analyze_channels.py! Defaulting to all channels.")
+        # Fallback if parser fails
         for c in range(num_c):
-            if top_roi:
-                process_chunk_wrapper(t, c, True, top_roi)
-            if bot_roi:
-                process_chunk_wrapper(t, c, False, bot_roi)
-                
+            extraction_plan.append((c, True, f"C{c}"))
+            extraction_plan.append((c, False, f"C{c}"))
+            
+    print(f"Detected Zarr shape: {z.shape}. T={num_t}, C={num_c}.")
+    print(f"Extraction Plan: {extraction_plan}")
+    
+    # Release the global store so workers don't inherit a locked file handle
+    del z
+    del store
+    
+    print("Starting multi-process extraction for maximum GPFS throughput...")
+    
+    num_workers = 4
+    chunk_size = math.ceil(num_t / num_workers)
+    
+    processes = []
+    for i in range(num_workers):
+        t_start = i * chunk_size
+        t_end = min((i + 1) * chunk_size, num_t)
+        if t_start >= num_t:
+            break
+            
+        p = mp.Process(target=process_timepoint_range, args=(
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, data_dir, args.psf
+        ))
+        p.start()
+        processes.append(p)
+        
+    for p in processes:
+        p.join()
+        
     print("All extraction and submission complete!")
 
 if __name__ == "__main__":
