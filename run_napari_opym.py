@@ -102,12 +102,31 @@ def _trim_tiff_files(output_dir: Path):
     return start_trim
 
 
-def _auto_detect_rois(image_layer) -> list[np.ndarray]:
-    """Auto-detects the biological sample ROI from the top and bottom halves."""
+def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.ndarray]:
+    """Auto-detects the biological sample ROI from the top and bottom halves.
+    Persists max_h and max_w to master_roi.json so future images match exactly.
+    """
     import scipy.ndimage
     import skimage.measure
+    import json
+    from pathlib import Path
     
-    print("\n🔍 Auto-detecting ROIs from data...")
+    print(f"\n🔍 Auto-detecting ROIs from data (Needs Top: {needs_top}, Needs Bot: {needs_bot})...")
+    
+    master_roi_path = None
+    if image_layer.source and image_layer.source.path:
+        master_roi_path = Path(image_layer.source.path).parent / "master_roi.json"
+        
+    master_h, master_w = 200, 200
+    if master_roi_path and master_roi_path.exists():
+        try:
+            with open(master_roi_path, 'r') as f:
+                d = json.load(f)
+                master_h = d.get("max_h", 200)
+                master_w = d.get("max_w", 200)
+            print(f"   📂 Loaded previous bounds from master_roi.json (H: {master_h}, W: {master_w})")
+        except: pass
+        
     # Get T=0 data. For lazy dask arrays, .compute() pulls just that timepoint
     t0_data = image_layer.data[0] if hasattr(image_layer.data, "compute") else image_layer.data[0]
     if hasattr(t0_data, "compute"):
@@ -166,8 +185,8 @@ def _auto_detect_rois(image_layer) -> list[np.ndarray]:
             "xmax": max_col
         }
 
-    top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0)
-    bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y)
+    top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0) if needs_top else None
+    bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y) if needs_bot else None
     
     # Unify bounding box sizes so Top and Bottom have the exact same dimensions.
     # We take the maximum width and maximum height across both detections.
@@ -175,13 +194,33 @@ def _auto_detect_rois(image_layer) -> list[np.ndarray]:
     shapes = []
     
     if valid_rois:
-        max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
-        max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
+        detected_max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
+        detected_max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
         
-        # Enforce minimum sizes just in case
-        max_h = max(max_h, 200)
-        max_w = max(max_w, 200)
+        # 🛡️ Guardrails: The cell ROIs should typically be around 600x900
+        EXPECTED_H = 600
+        EXPECTED_W = 900
         
+        if detected_max_h < 250 or detected_max_h > 1000:
+            print(f"⚠️  Detected ROI Height ({detected_max_h}) is outside normal biological bounds. Clamping to {EXPECTED_H}.")
+            detected_max_h = EXPECTED_H
+            
+        if detected_max_w < 400 or detected_max_w > 1800:
+            print(f"⚠️  Detected ROI Width ({detected_max_w}) is outside normal biological bounds. Clamping to {EXPECTED_W}.")
+            detected_max_w = EXPECTED_W
+        
+        # Enforce minimum sizes and blend with master.json if it existed
+        max_h = max(detected_max_h, master_h)
+        max_w = max(detected_max_w, master_w)
+        
+        # Save back the new maximums to ensure future images match
+        if master_roi_path:
+            try:
+                with open(master_roi_path, 'w') as f:
+                    json.dump({"max_h": max_h, "max_w": max_w}, f)
+            except Exception as e:
+                print(f"⚠️ Could not save master_roi.json: {e}")
+                
         for r_dict in [top_roi_dict, bot_roi_dict]:
             if r_dict is None:
                 continue
@@ -457,7 +496,10 @@ def petakit_pipeline(
 
     # 🔍 Auto-Detect ROIs if none are drawn
     if len(shapes_layer.data) == 0:
-        detected_shapes = _auto_detect_rois(image_layer)
+        needs_top = pipeline_widget.save_gfp.value or pipeline_widget.save_mscarlet.value
+        needs_bot = pipeline_widget.save_calcein_violet.value or pipeline_widget.save_cf647.value
+        
+        detected_shapes = _auto_detect_rois(image_layer, needs_top=needs_top, needs_bot=needs_bot)
         if detected_shapes:
             shapes_layer.data = detected_shapes
             print("✏️  Drew auto-detected ROIs onto the Napari shapes layer.")
@@ -667,7 +709,31 @@ def load_lazy_ome_tiff(file_path: Path, first_timepoint_only: bool = False) -> n
                 settings = json.load(f)
                 detected_z_val = float(settings.get("stepSizeUm", 0.3))
                 z_step = str(detected_z_val)
-        except: pass
+                
+                # Parse excitations
+                channels = settings.get("channels", [])
+                configs = [ch.get("config_", "") for ch in channels if ch.get("useChannel_", True)]
+                
+                has_488 = any("488" in c.lower() for c in configs)
+                has_405 = any("405" in c.lower() for c in configs)
+                has_561 = any("561" in c.lower() for c in configs)
+                has_642 = any("642" in c.lower() or "640" in c.lower() for c in configs)
+                has_all = any("all lasers" in c.lower() for c in configs)
+                
+                if has_all:
+                    pipeline_widget.save_gfp.value = True
+                    pipeline_widget.save_calcein_violet.value = True
+                    pipeline_widget.save_mscarlet.value = True
+                    pipeline_widget.save_cf647.value = True
+                else:
+                    pipeline_widget.save_gfp.value = has_488
+                    pipeline_widget.save_calcein_violet.value = has_405
+                    pipeline_widget.save_mscarlet.value = has_561
+                    pipeline_widget.save_cf647.value = has_642
+                    
+                print(f"🔦 Parsed Excitation Configs: {configs}")
+        except Exception as e: 
+            print(f"⚠️ Error parsing AcqSettings.txt: {e}")
             
     try:
         if detected_z_val is not None:
