@@ -690,7 +690,13 @@ def petakit_pipeline(
 @magic_factory(call_button="Load OME-TIFF")
 def load_lazy_ome_tiff(file_path: Path, first_timepoint_only: bool = False) -> napari.types.LayerDataTuple:
     """Open a massive OME-TIFF as a lazy Dask array via a file selector."""
-    store = tifffile.imread(file_path, aszarr=True)
+    import warnings
+    import tifffile
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        store = tifffile.imread(file_path, aszarr=True)
+        
     z = zarr.open(store, mode="r")
     lazy_data = da.from_zarr(z)
 
