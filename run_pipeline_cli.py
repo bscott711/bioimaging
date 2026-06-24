@@ -175,7 +175,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, data_dir, psf_path):
+def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map):
     import tifffile
     import zarr
     import time
@@ -221,14 +221,16 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
             st2 = time.time()
             tifffile.imwrite(shm_path, cropped_mem, imagej=True)
             
-            output_dir = data_dir.parent / "cell_1_FAST" / ("Top" if is_top else "Bot")
+            output_dir = output_dir_base / ("Top" if is_top else "Bot")
             output_dir.mkdir(exist_ok=True, parents=True)
             output_file = output_dir / shm_path.name
+            
+            psf_path = psf_map.get(laser_name, None)
             
             submit_pipeline_job(
                 output_file=output_file,
                 shm_path=shm_path,
-                psf_paths=[psf_path],
+                psf_paths=[psf_path] if psf_path else None,
                 z_step_um=z_step_um,
                 iterations=10,
             )
@@ -289,6 +291,14 @@ def main():
     print(f"Detected Zarr shape: {z.shape}. T={num_t}, C={num_c}.")
     print(f"Extraction Plan: {extraction_plan}")
     
+    output_dir_base = data_dir.parent / "cell_1_FAST"
+    psf_map = {
+        "488nm": args.psf,
+        "405nm": args.psf,
+        "561nm": args.psf,
+        "640nm": args.psf
+    }
+    
     # Release the global store so workers don't inherit a locked file handle
     del z
     del store
@@ -306,7 +316,7 @@ def main():
             break
             
         p = mp.Process(target=process_timepoint_range, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, data_dir, args.psf
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map
         ))
         p.start()
         processes.append(p)

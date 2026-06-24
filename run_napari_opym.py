@@ -252,6 +252,36 @@ def _worker_init(base_file_str):
     _global_store = tifffile.imread(base_file_str, aszarr=True)
     _global_z = zarr.open(_global_store, mode='r')
 
+def _write_behind_worker(stop_event):
+    from concurrent.futures import ThreadPoolExecutor
+    import shutil, json, time
+    from pathlib import Path
+    
+    completed_dir = Path("~/petakit_jobs/completed").expanduser()
+    shm_dir = Path("/dev/shm/opym_jobs")
+    
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        while not stop_event.is_set():
+            for p in list(completed_dir.glob("*.json")):
+                try:
+                    with open(p, 'r') as f:
+                        job_data = json.load(f)
+                    
+                    out_path = Path(job_data["output_file"])
+                    shm_final = shm_dir / f"{out_path.name}_final"
+                    
+                    if shm_final.exists():
+                        moving_path = shm_dir / f"{out_path.name}_moving"
+                        shm_final.rename(moving_path)
+                        
+                        def move_file(src, dst):
+                            shutil.move(str(src), str(dst))
+                            
+                        executor.submit(move_file, moving_path, out_path)
+                except Exception as e:
+                    pass
+            time.sleep(0.5)
+
 def _process_chunk_worker(t, c, is_top, roi, base_file, output_dir, psf_file, z_step_um, sheet_angle_deg, decon_iters, z_crop_end=None, c_axis=1, lazy_array=None):
     import tifffile
     import zarr
@@ -270,8 +300,14 @@ def _process_chunk_worker(t, c, is_top, roi, base_file, output_dir, psf_file, z_
     out_sub_dir = output_dir
     
     shm_dir = Path("/dev/shm/opym_jobs")
-    while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 25:
-        time.sleep(1)
+    while shm_dir.exists():
+        incoming_chunks = len(list(shm_dir.glob("*.tif")))
+        final_chunks = len(list(shm_dir.glob("*_final")))
+        
+        if incoming_chunks > 20 or final_chunks > 800:
+            time.sleep(1)
+        else:
+            break
         
     global _global_z
     if _global_z is not None:
@@ -723,6 +759,16 @@ def petakit_pipeline(
             master_roi_path=master_roi_path,
             lazy_array=image_layer.data,
         )
+        import threading
+        stop_event = threading.Event()
+        daemon = threading.Thread(target=_write_behind_worker, args=(stop_event,), daemon=True)
+        daemon.start()
+        
+        def _on_finish():
+            print("🛑 Pipeline finished. Stopping write-behind cache daemon...")
+            stop_event.set()
+            
+        worker.finished.connect(_on_finish)
         worker.start()
     except Exception as e:
         print(f"❌ Failed to queue job pipeline: {e}")
