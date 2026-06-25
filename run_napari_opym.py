@@ -268,16 +268,17 @@ def _write_behind_worker(stop_event):
                         job_data = json.load(f)
                     
                     out_path = Path(job_data["output_file"])
-                    shm_final = shm_dir / f"{out_path.name}_final"
+                    shm_final = shm_dir / f"{out_path.stem}_final.zarr"
                     
                     if shm_final.exists():
-                        moving_path = shm_dir / f"{out_path.name}_moving"
+                        moving_path = shm_dir / f"{out_path.stem}_moving.zarr"
                         shm_final.rename(moving_path)
                         
-                        def move_file(src, dst):
-                            shutil.move(str(src), str(dst))
+                        def move_zarr(src, dst):
+                            shutil.copytree(str(src), str(dst))
+                            shutil.rmtree(str(src))
                             
-                        executor.submit(move_file, moving_path, out_path)
+                        executor.submit(move_zarr, moving_path, out_path.with_suffix('.zarr'))
                 except Exception as e:
                     pass
             time.sleep(0.5)
@@ -296,13 +297,13 @@ def _process_chunk_worker(t, c, is_top, roi, base_file, output_dir, psf_file, z_
     elif prefix.lower().endswith(".tif"):
         prefix = prefix[:-4]
         
-    shm_path = Path(f"/dev/shm/opym_jobs/{prefix}_T{t:04d}_C{c:02d}.ome.tif")
+    shm_path = Path(f"/dev/shm/opym_jobs/{prefix}_T{t:04d}_C{c:02d}.zarr")
     out_sub_dir = output_dir
     
     shm_dir = Path("/dev/shm/opym_jobs")
     while shm_dir.exists():
-        incoming_chunks = len(list(shm_dir.glob("*.tif")))
-        final_chunks = len(list(shm_dir.glob("*_final")))
+        incoming_chunks = len(list(shm_dir.glob("*.zarr")))
+        final_chunks = len(list(shm_dir.glob("*_final.zarr")))
         
         if incoming_chunks > 20 or final_chunks > 800:
             time.sleep(1)
@@ -332,7 +333,7 @@ def _process_chunk_worker(t, c, is_top, roi, base_file, output_dir, psf_file, z_
         raise RuntimeError(f"❌ Extraction failed! Expected lazy_array to be 4D or 5D, but got {z.ndim}D array with shape {z.shape}.")
 
     shm_path.parent.mkdir(exist_ok=True, parents=True)
-    tifffile.imwrite(shm_path, np.array(cropped), imagej=True)
+    zarr.save(shm_path, np.array(cropped))
     
     out_sub_dir.mkdir(exist_ok=True, parents=True)
     output_file = out_sub_dir / shm_path.name

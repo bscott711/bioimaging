@@ -74,9 +74,9 @@ def main(duration_seconds=600):
     ax2.legend(loc='upper right')
     
     plt.tight_layout()
-    output_file = "/home/SDSMT.LOCAL/bscott/.gemini/antigravity-ide/brain/796182a1-20db-4a95-bd08-7212a7e444d7/scratch/gpu_metrics_over_time.png"
+    output_file = "/home/SDSMT.LOCAL/bscott/.gemini/antigravity-ide/brain/1e96a6cd-54a2-4fc1-b442-accbe54e4143/gpu_metrics_over_time.png"
     plt.savefig(output_file)
     print(f"Plot saved to: {output_file}")
 
 if __name__ == "__main__":
-    main(duration_seconds=600)
+    main(duration_seconds=180)
