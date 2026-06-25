@@ -215,7 +215,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map):
+def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False):
     import tifffile
     import zarr
     import time
@@ -283,6 +283,7 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
                 psf_paths=[psf_path] if psf_path else None,
                 z_step_um=z_step_um,
                 iterations=10,
+                debug=debug
             )
             print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
             print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Job Submitted!")
@@ -291,6 +292,8 @@ def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
     parser.add_argument("data_path", type=str, help="Path to the directory containing the ome.tif file")
     parser.add_argument("--psf", type=str, default="/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif", help="Path to PSF")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output and profiling")
+    parser.add_argument("--t0-only", action="store_true", help="Process only the first timepoint (T=0) for rapid testing")
     args = parser.parse_args()
 
     data_dir = Path(args.data_path).resolve()
@@ -341,6 +344,10 @@ def main():
             out_c += 1
             extraction_plan.append((c, False, f"C{c}", out_c))
             out_c += 1
+
+    if args.t0_only:
+        print("⚠️ --t0-only flag detected: Restricting pipeline to T=0.")
+        num_t = min(1, num_t)
             
     print(f"Detected Zarr shape: {z.shape}. T={num_t}, C={num_c}.")
     print(f"Extraction Plan: {extraction_plan}")
@@ -370,7 +377,7 @@ def main():
             break
             
         p = mp.Process(target=process_timepoint_range, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug
         ))
         p.start()
         processes.append(p)
