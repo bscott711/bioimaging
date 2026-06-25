@@ -46,3 +46,4 @@ opym = { path = "../opym_local", editable = true }
 [project.scripts]
 opym = "run_pipeline_cli:main"
 naparym = "run_napari_opym:main"
+opym-serve = "opym.local_gpu_worker:main"
