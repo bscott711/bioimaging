@@ -215,7 +215,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False):
+def process_timepoint_worker(target_path, shared_t, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
@@ -231,7 +231,14 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
     # Clean the filename up, e.g. "cell_MMStack_Pos0_47.ome" -> "cell_MMStack_Pos0"
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    for t in range(t_start, num_t, t_step):
+    while True:
+        with shared_t.get_lock():
+            t = shared_t.value
+            shared_t.value += 1
+            
+        if t >= num_t:
+            break
+            
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -243,7 +250,7 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
             while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
                 time.sleep(1)
                 
-            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
             import concurrent.futures
@@ -262,12 +269,12 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
             else:
                 return
 
-            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
                 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
             cropped_mem = np.array(cropped)
             
-            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
             st2 = time.time()
             zarr.save(shm_path, cropped_mem)
             
@@ -285,8 +292,8 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
                 iterations=10,
                 debug=debug
             )
-            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
-            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Job Submitted!")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Job Submitted!")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -364,18 +371,15 @@ def main():
     del z
     del store
     
-    print("Starting strided multi-process extraction to maintain GPFS read-ahead cache window...")
+    print("Starting dynamically-scheduled multi-process extraction to keep GPFS read-ahead tight...")
     
     num_workers = min(8, mp.cpu_count() // 2)
+    shared_t = mp.Value('i', 0)
     
     processes = []
     for i in range(num_workers):
-        t_start = i
-        if t_start >= num_t:
-            break
-
-        p = mp.Process(target=process_timepoint_range, args=(
-            target_path, t_start, num_t, num_workers, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug
+        p = mp.Process(target=process_timepoint_worker, args=(
+            target_path, shared_t, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug, i
         ))
         p.start()
         processes.append(p)
