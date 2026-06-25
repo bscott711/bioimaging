@@ -215,7 +215,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
+def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
@@ -227,9 +227,14 @@ def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_pla
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    # STRICT SEQUENTIAL LOOP over the assigned chunk
-    # This guarantees the GPFS read-ahead cache stays perfectly aligned
-    for t in range(t_start, t_end):
+    # Dynamic queue guarantees workers stay clustered on adjacent timepoints
+    while True:
+        with shared_t.get_lock():
+            t = shared_t.value
+            shared_t.value += 1
+            
+        if t >= num_t:
+            break
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -356,26 +361,16 @@ def main():
     import re
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    print("Starting Chunked Static Assignment with Bulk Reads...")
+    print("Starting Clustered Dynamic Assignment with Bulk Single-Reads...")
     
     # Determine optimal worker count
     num_workers = min(8, mp.cpu_count() // 2)
-    
-    # Calculate static contiguous chunks
-    import math
-    chunk_size = math.ceil(num_t / num_workers)
+    shared_t = mp.Value('i', 0)
     
     processes = []
     for i in range(num_workers):
-        t_start = i * chunk_size
-        t_end = min((i + 1) * chunk_size, num_t)
-        
-        # If we have more cores than timepoints, stop spawning
-        if t_start >= num_t:
-            break
-            
         p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
+            target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, 
             z_step_um, output_dir_base, psf_map, base_name, args.debug, i
         ))
         p.start()
