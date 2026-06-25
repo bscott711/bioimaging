@@ -49,6 +49,28 @@ def auto_detect_rois(z_array, master_roi_path=None):
     max_y, max_x = max_proj.shape
     half_y = max_y // 2
     
+def auto_detect_rois(z, master_roi_path=None):
+    import numpy as np
+    from skimage.measure import regionprops, label
+    import json
+    import scipy.ndimage
+    import skimage.measure
+    
+    # Fast projection of middle timepoint to find ROIs
+    t_mid = z.shape[0] // 2
+    if len(z.shape) == 5:
+        # z shape might be (T,C,Z,Y,X) or (T,Z,C,Y,X)
+        if z.shape[1] < z.shape[2]: # (T,C,Z,Y,X)
+            img = z[t_mid, 0, z.shape[2]//2, :, :]
+        else: # (T,Z,C,Y,X)
+            img = z[t_mid, z.shape[1]//2, 0, :, :]
+    else:
+        return None, None
+        
+    max_proj = np.array(img)
+    max_y, max_x = max_proj.shape
+    half_y = max_y // 2
+    
     def _find_half_roi(image_half, offset_y=0):
         if np.max(image_half) < 300:
             return None
@@ -90,8 +112,9 @@ def auto_detect_rois(z_array, master_roi_path=None):
         EXPECTED_H = 576
         EXPECTED_W = 1152
             
-        max_h = max(detected_max_h, EXPECTED_H)
-        max_w = max(detected_max_w, EXPECTED_W)
+        import scipy.fft
+        max_h = scipy.fft.next_fast_len(max(detected_max_h, EXPECTED_H))
+        max_w = scipy.fft.next_fast_len(max(detected_max_w, EXPECTED_W))
         
         if master_roi_path:
             try:
@@ -159,19 +182,36 @@ def get_extraction_plan(target_path: Path):
     has_640 = any("640" in c for c in detected)
     
     plan = []
+    out_c = 0
     
     if len(raw_configs) <= 1:
-        if has_488: plan.append((0, True, "488nm"))
-        if has_405: plan.append((0, False, "405nm"))
-        if has_561: plan.append((1, True, "561nm"))
-        if has_640: plan.append((1, False, "640nm"))
+        if has_488: 
+            plan.append((0, True, "488nm", out_c))
+            out_c += 1
+        if has_405: 
+            plan.append((0, False, "405nm", out_c))
+            out_c += 1
+        if has_561: 
+            plan.append((1, True, "561nm", out_c))
+            out_c += 1
+        if has_640: 
+            plan.append((1, False, "640nm", out_c))
+            out_c += 1
     else:
         for i, config in enumerate(raw_configs):
             config_lower = config.lower()
-            if "488" in config_lower: plan.append((i*2 + 0, True, "488nm"))
-            if "405" in config_lower: plan.append((i*2 + 0, False, "405nm"))
-            if "561" in config_lower: plan.append((i*2 + 1, True, "561nm"))
-            if "640" in config_lower: plan.append((i*2 + 1, False, "640nm"))
+            if "488" in config_lower: 
+                plan.append((i*2 + 0, True, "488nm", out_c))
+                out_c += 1
+            if "405" in config_lower: 
+                plan.append((i*2 + 0, False, "405nm", out_c))
+                out_c += 1
+            if "561" in config_lower: 
+                plan.append((i*2 + 1, True, "561nm", out_c))
+                out_c += 1
+            if "640" in config_lower: 
+                plan.append((i*2 + 1, False, "640nm", out_c))
+                out_c += 1
             
     return plan
 
@@ -181,47 +221,57 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
     import time
     import numpy as np
     from pathlib import Path
+    import re
     from opym.petakit import submit_pipeline_job
     
     # Each process MUST open its own independent file handle!
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
+    # Clean the filename up, e.g. "cell_MMStack_Pos0_47.ome" -> "cell_MMStack_Pos0"
+    base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
+    
     for t in range(t_start, t_end):
-        for c, is_top, laser_name in extraction_plan:
+        for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
             
-            roi_name = "top" if is_top else "bot"
-            shm_path = Path(f"/dev/shm/opym_jobs/{target_path.stem}_T{t:04d}_C{c}_{roi_name}.tif")
+            shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
             
             # Throttle so we don't fill up /dev/shm
             shm_dir = Path("/dev/shm/opym_jobs")
             while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 100:
                 time.sleep(1)
                 
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Extracting {laser_name}...")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
+            import concurrent.futures
             # Correctly slice the dimensions to yield (Z, Y, X)
             if z.ndim == 5:
                 if c_axis == 1:
-                    cropped = z[t, c, :, roi[0], roi[1]]
+                    num_z = z.shape[2]
+                    def fetch_z(z_idx): return z[t, c, z_idx, roi[0], roi[1]]
                 else:
-                    cropped = z[t, :, c, roi[0], roi[1]]
+                    num_z = z.shape[1]
+                    def fetch_z(z_idx): return z[t, z_idx, c, roi[0], roi[1]]
+                    
+                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as tpe:
+                    slices = list(tpe.map(fetch_z, range(num_z)))
+                cropped = np.stack(slices, axis=0)
             else:
                 return
 
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
                 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
             cropped_mem = np.array(cropped)
             
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Writing to {shm_path}...")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
             st2 = time.time()
-            tifffile.imwrite(shm_path, cropped_mem, imagej=True)
+            zarr.save(shm_path, cropped_mem)
             
-            output_dir = output_dir_base / ("Top" if is_top else "Bot")
+            output_dir = output_dir_base
             output_dir.mkdir(exist_ok=True, parents=True)
             output_file = output_dir / shm_path.name
             
@@ -234,8 +284,8 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
                 z_step_um=z_step_um,
                 iterations=10,
             )
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Written in {time.time()-st2:.2f}s")
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{c}:{roi_name}] Job Submitted!")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
+            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Job Submitted!")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -251,7 +301,8 @@ def main():
         print(f"No .ome.tif found in {data_dir}")
         return
         
-    target_path = ome_tifs[0]
+    # Always pick the root file (shortest name), e.g. cell_MMStack_Pos0.ome.tif
+    target_path = min(ome_tifs, key=lambda p: len(p.name))
     master_roi_path = data_dir / "master_roi.json"
     z_step_um = get_z_step(target_path)
     
@@ -284,14 +335,17 @@ def main():
     if not extraction_plan:
         print("⚠️ Warning: Could not generate extraction plan from analyze_channels.py! Defaulting to all channels.")
         # Fallback if parser fails
+        out_c = 0
         for c in range(num_c):
-            extraction_plan.append((c, True, f"C{c}"))
-            extraction_plan.append((c, False, f"C{c}"))
+            extraction_plan.append((c, True, f"C{c}", out_c))
+            out_c += 1
+            extraction_plan.append((c, False, f"C{c}", out_c))
+            out_c += 1
             
     print(f"Detected Zarr shape: {z.shape}. T={num_t}, C={num_c}.")
     print(f"Extraction Plan: {extraction_plan}")
     
-    output_dir_base = data_dir.parent / "cell_1_FAST"
+    output_dir_base = data_dir / "Decon"
     psf_map = {
         "488nm": args.psf,
         "405nm": args.psf,
