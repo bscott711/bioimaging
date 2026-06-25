@@ -229,71 +229,43 @@ def cache_warmer(filepath):
     except Exception as e:
         print(f"Cache Warmer error: {e}")
 
-def gpfs_producer(target_path, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, base_name, job_queue, NUM_CONSUMERS):
-    """Reads sequentially from GPFS, writes to RAM, and feeds the consumers."""
-    import tifffile
-    import zarr
-    import numpy as np
+def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
+    import tifffile, zarr, time, numpy as np
     from pathlib import Path
-    import time
+    from opym.petakit import submit_pipeline_job
     
-    # Single file handle for perfectly sequential access
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    for t in range(num_t):
+    for t in range(t_start, t_end):
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
             
             shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
-            
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
-            # BULK SINGLE-READ (Sequential, single-threaded)
+            
+            # BULK SINGLE-READ
             if z.ndim == 5:
-                if c_axis == 1:
-                    cropped = np.array(z[t, c, :, roi[0], roi[1]])
-                else:
-                    cropped = np.array(z[t, :, c, roi[0], roi[1]])
-            else:
-                continue
-                
-            shm_path.parent.mkdir(exist_ok=True, parents=True)
-            zarr.save(shm_path, cropped)
-            
-            # Feed the consumers
-            job_queue.put({
-                'shm_path': shm_path, 't': t, 'output_c': output_c, 
-                'laser_name': laser_name, 'z_step_um': z_step_um
-            })
-            
-    # Send poison pills to stop consumers
-    for _ in range(NUM_CONSUMERS):
-        job_queue.put(None)
+                if c_axis == 1: cropped = np.array(z[t, c, :, roi[0], roi[1]])
+                else: cropped = np.array(z[t, :, c, roi[0], roi[1]])
+            else: continue
 
-def job_consumer(job_queue, output_dir_base, psf_map, debug, worker_id):
-    """Pulls from RAM queue and submits jobs. Variable latency here won't hurt GPFS."""
-    from opym.petakit import submit_pipeline_job
-    import time
-    
-    while True:
-        msg = job_queue.get()
-        if msg is None: break # Poison pill
-        
-        shm_path = msg['shm_path']
-        output_file = output_dir_base / shm_path.name
-        psf_path = psf_map.get(msg['laser_name'], None)
-        
-        st = time.time()
-        submit_pipeline_job(
-            output_file=output_file,
-            shm_path=shm_path,
-            psf_paths=[psf_path] if psf_path else None,
-            z_step_um=msg['z_step_um'],
-            iterations=10,
-            debug=debug
-        )
-        print(f"[Consumer {worker_id:02d}] Submitted T={msg['t']:03d} C={msg['output_c']} in {time.time()-st:.2f}s")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracted in {time.time()-st:.2f}s")
+            shm_path.parent.mkdir(exist_ok=True, parents=True)
+            
+            st2 = time.time()
+            zarr.save(shm_path, cropped)
+            output_file = output_dir_base / shm_path.name
+            psf_path = psf_map.get(laser_name, None)
+            
+            submit_pipeline_job(
+                output_file=output_file, shm_path=shm_path,
+                psf_paths=[psf_path] if psf_path else None,
+                z_step_um=z_step_um, iterations=10, debug=debug
+            )
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written & Submitted in {time.time()-st2:.2f}s")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -375,43 +347,36 @@ def main():
     import re
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    print("🔥 Starting Cache Warmer to pre-load GPFS file into 252GB RAM...")
+    print("🔥 Starting Cache Warmer to pre-load 23GB GPFS file into 252GB RAM...")
     warmer = mp.Process(target=cache_warmer, args=(str(target_path),))
     warmer.start()
     
-    # Give the warmer a 2-second head start to establish the sequential GPFS stream
-    time.sleep(2) 
+    # CRITICAL FIX: Wait for the warmer to finish BEFORE starting workers.
+    # This guarantees the entire file is in the OS Page Cache (RAM).
+    warmer.join() 
     
-    # Define Consumer count (usually half your cores)
-    NUM_CONSUMERS = min(8, mp.cpu_count() // 2)
+    print("🚀 File is 100% in RAM. Starting 8 Parallel Chunked Workers...")
     
-    # The Queue provides natural backpressure. If consumers are slow, 
-    # the producer stops reading, preventing /dev/shm from overflowing.
-    job_queue = mp.Queue(maxsize=20) 
+    num_workers = min(8, mp.cpu_count() // 2)
+    import math
+    chunk_size = math.ceil(num_t / num_workers)
     
-    print("Starting Producer-Consumer Architecture...")
-    
-    # 1 Producer
-    producer = mp.Process(target=gpfs_producer, args=(
-        target_path, num_t, c_axis, extraction_plan, top_roi, bot_roi, 
-        z_step_um, base_name, job_queue, NUM_CONSUMERS
-    ))
-    producer.start()
-    
-    # N Consumers
-    consumers = []
-    for i in range(NUM_CONSUMERS):
-        c = mp.Process(target=job_consumer, args=(
-            job_queue, output_dir_base, psf_map, args.debug, i
+    processes = []
+    for i in range(num_workers):
+        t_start = i * chunk_size
+        t_end = min((i + 1) * chunk_size, num_t)
+        if t_start >= num_t: break
+        
+        p = mp.Process(target=process_timepoint_worker, args=(
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
+            z_step_um, output_dir_base, psf_map, base_name, args.debug, i
         ))
-        c.start()
-        consumers.append(c)
+        p.start()
+        processes.append(p)
         
-    producer.join()
-    for c in consumers: 
-        c.join()
+    for p in processes:
+        p.join()
         
-    warmer.join()
     print("All extraction and submission complete!")
 
 if __name__ == "__main__":
