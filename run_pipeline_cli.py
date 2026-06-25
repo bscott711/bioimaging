@@ -162,7 +162,7 @@ def get_z_step(target_path: Path):
     return 0.3
 
 def get_extraction_plan(target_path: Path):
-    from analyze_channels import analyze_directory, parse_name_for_fluorophores
+    from psf_tools.analyze_channels import analyze_directory, parse_name_for_fluorophores
     base_dir = target_path.parent.parent
     results = analyze_directory(str(base_dir))
     folder_name = target_path.parent.name
@@ -364,9 +364,9 @@ def main():
     del z
     del store
     
-    print("Starting multi-process extraction for maximum GPFS throughput...")
+    print("Starting sequential extraction to maintain GPFS read-ahead cache throughput...")
     
-    num_workers = 4
+    num_workers = 1
     chunk_size = math.ceil(num_t / num_workers)
     
     processes = []
