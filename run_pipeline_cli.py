@@ -232,6 +232,11 @@ def process_timepoint_worker(target_path, shared_t, num_t, c_axis, extraction_pl
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
     while True:
+        # Throttle BEFORE taking a timepoint so they don't lock in future timepoints and wake up out of order
+        shm_dir = Path("/dev/shm/opym_jobs")
+        while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
+            time.sleep(1)
+
         with shared_t.get_lock():
             t = shared_t.value
             shared_t.value += 1
@@ -245,11 +250,6 @@ def process_timepoint_worker(target_path, shared_t, num_t, c_axis, extraction_pl
             
             shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
             
-            # Throttle so we don't fill up /dev/shm
-            shm_dir = Path("/dev/shm/opym_jobs")
-            while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
-                time.sleep(1)
-                
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
