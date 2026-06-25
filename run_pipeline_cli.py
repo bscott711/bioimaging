@@ -215,7 +215,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False):
+def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False):
     import tifffile
     import zarr
     import time
@@ -231,7 +231,7 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
     # Clean the filename up, e.g. "cell_MMStack_Pos0_47.ome" -> "cell_MMStack_Pos0"
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    for t in range(t_start, t_end):
+    for t in range(t_start, num_t, t_step):
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -243,7 +243,7 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
             while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
                 time.sleep(1)
                 
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
+            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
             import concurrent.futures
@@ -364,20 +364,18 @@ def main():
     del z
     del store
     
-    print("Starting sequential extraction to maintain GPFS read-ahead cache throughput...")
+    print("Starting strided multi-process extraction to maintain GPFS read-ahead cache window...")
     
-    num_workers = 1
-    chunk_size = math.ceil(num_t / num_workers)
+    num_workers = min(8, mp.cpu_count() // 2)
     
     processes = []
     for i in range(num_workers):
-        t_start = i * chunk_size
-        t_end = min((i + 1) * chunk_size, num_t)
+        t_start = i
         if t_start >= num_t:
             break
-            
+
         p = mp.Process(target=process_timepoint_range, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug
+            target_path, t_start, num_t, num_workers, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug
         ))
         p.start()
         processes.append(p)
