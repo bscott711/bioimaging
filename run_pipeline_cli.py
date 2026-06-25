@@ -375,7 +375,7 @@ def main():
     
     print("Starting dynamically-scheduled multi-process extraction to keep GPFS read-ahead tight...")
     
-    num_workers = min(8, mp.cpu_count() // 2)
+    num_workers = min(32, mp.cpu_count() // 2)
     barrier = mp.Barrier(num_workers)
     
     processes = []
