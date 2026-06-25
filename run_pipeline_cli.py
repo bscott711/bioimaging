@@ -215,7 +215,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_worker(target_path, barrier, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False, worker_id=0):
+def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
@@ -231,22 +231,21 @@ def process_timepoint_worker(target_path, barrier, num_workers, num_t, c_axis, e
     # Clean the filename up, e.g. "cell_MMStack_Pos0_47.ome" -> "cell_MMStack_Pos0"
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    import math
-    import threading
-
-    num_chunks = math.ceil(num_t / num_workers)
-    
-    for chunk_index in range(num_chunks):
-        t = chunk_index * num_workers + worker_id
-        
-        if t < num_t:
-            for c, is_top, laser_name, output_c in extraction_plan:
-                roi = top_roi if is_top else bot_roi
-                if not roi: continue
-                
-                shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
-                
-                print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
+    while True:
+        with shared_t.get_lock():
+            t = shared_t.value
+            shared_t.value += 1
+            
+        if t >= num_t:
+            break
+            
+        for c, is_top, laser_name, output_c in extraction_plan:
+            roi = top_roi if is_top else bot_roi
+            if not roi: continue
+            
+            shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
+            
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
             import concurrent.futures
@@ -290,12 +289,6 @@ def process_timepoint_worker(target_path, barrier, num_workers, num_t, c_axis, e
             )
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Job Submitted!")
-
-        # Everyone waits at the barrier before moving to the next chunk!
-        try:
-            barrier.wait()
-        except threading.BrokenBarrierError:
-            pass
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -375,13 +368,13 @@ def main():
     
     print("Starting dynamically-scheduled multi-process extraction to keep GPFS read-ahead tight...")
     
-    num_workers = min(32, mp.cpu_count() // 2)
-    barrier = mp.Barrier(num_workers)
+    num_workers = min(8, mp.cpu_count() // 2)
+    shared_t = mp.Value('i', 0)
     
     processes = []
     for i in range(num_workers):
         p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, barrier, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug, i
+            target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug, i
         ))
         p.start()
         processes.append(p)
