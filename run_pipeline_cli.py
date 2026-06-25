@@ -215,45 +215,52 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint(args_tuple):
+def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, debug, worker_id):
     """
-    Pure, simple, local processing. No shared state, no network I/O.
-    The file is already in /dev/shm so tifffile will mmap it from local RAM.
+    Process a contiguous chunk of timepoints directly from GPFS.
+    Opens the multi-file Zarr store ONCE (paying a one-time metadata tax),
+    then streams sequentially through the assigned range.
     """
-    t, local_tif, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, debug = args_tuple
-    import tifffile, zarr, time
+    import tifffile, zarr, time, numpy as np
     from pathlib import Path
     from opym.petakit import submit_pipeline_job
     
-    # Open the LOCAL file in RAM
-    store = tifffile.imread(str(local_tif), aszarr=True)
+    # Open the multi-file Zarr store ONCE per worker.
+    # tifffile handles the 94-file routing automatically.
+    store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    for c, is_top, laser_name, output_c in extraction_plan:
-        roi = top_roi if is_top else bot_roi
-        if not roi: continue
-        
-        shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
-        st = time.time()
-        
-        # THE SIMPLE READ - file is local RAM, no GPFS involved
-        if z.ndim == 5:
-            if c_axis == 1: cropped = z[t, c, :, roi[0], roi[1]]
-            else: cropped = z[t, :, c, roi[0], roi[1]]
-        else: continue
-        
-        shm_path.parent.mkdir(exist_ok=True, parents=True)
-        zarr.save(shm_path, cropped)
-        
-        output_file = output_dir_base / shm_path.name
-        psf_path = psf_map.get(laser_name, None)
-        
-        submit_pipeline_job(
-            output_file=output_file, shm_path=shm_path,
-            psf_paths=[psf_path] if psf_path else None,
-            z_step_um=z_step_um, iterations=10, debug=debug
-        )
-        print(f"[T={t:03d} C={output_c}] Extracted + Submitted in {time.time()-st:.2f}s")
+    print(f"[Worker {worker_id:02d}] Initialized. Processing T={t_start} to {t_end-1}")
+    
+    for t in range(t_start, t_end):
+        for c, is_top, laser_name, output_c in extraction_plan:
+            roi = top_roi if is_top else bot_roi
+            if not roi: continue
+            
+            shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
+            st = time.time()
+            
+            # BULK SINGLE-READ
+            if z.ndim == 5:
+                if c_axis == 1: cropped = np.array(z[t, c, :, roi[0], roi[1]])
+                else: cropped = np.array(z[t, :, c, roi[0], roi[1]])
+            else: continue
+            
+            extract_time = time.time() - st
+            
+            shm_path.parent.mkdir(exist_ok=True, parents=True)
+            zarr.save(shm_path, cropped)
+            
+            output_file = output_dir_base / shm_path.name
+            psf_path = psf_map.get(laser_name, None)
+            
+            submit_pipeline_job(
+                output_file=output_file, shm_path=shm_path,
+                psf_paths=[psf_path] if psf_path else None,
+                z_step_um=z_step_um, iterations=10, debug=debug
+            )
+            
+            print(f"[Worker {worker_id:02d}] T={t:03d} C={output_c} | Extract: {extract_time:.2f}s")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -333,42 +340,33 @@ def main():
     
     # Clean the filename up for the workers to use
     import re
-    import shutil
     from concurrent.futures import ProcessPoolExecutor
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    # ==========================================
-    # PHASE 1: DATA STAGING (Sequential I/O)
-    # ==========================================
-    local_tif = Path("/dev/shm/source_data_staging.ome.tif")
-    print(f"\n🚚 Staging data from GPFS to local RAM (/dev/shm)...")
-    st = time.time()
-    shutil.copyfile(target_path, local_tif)
-    print(f"✅ Staged in {time.time()-st:.2f}s. GPFS is now out of the picture.")
-    
-    # ==========================================
-    # PHASE 2: LOCAL EXTRACTION (Random I/O on local RAM)
-    # ==========================================
-    print("🚀 Starting Parallel Local Extraction...")
+    print(f"\n🚀 Starting Direct GPFS Streaming (8 Workers)...")
+    print(f"⚠️  Note: First timepoint per worker may take ~30-45s (OME-XML metadata parse).")
+    print(f"⚠️  Subsequent timepoints will fly at < 1s.")
     
     num_workers = min(8, mp.cpu_count() // 2)
-    
-    # Build args for each timepoint
-    task_args = [
-        (t, local_tif, c_axis, extraction_plan, top_roi, bot_roi,
-         base_name, output_dir_base, psf_map, z_step_um, args.debug)
-        for t in range(num_t)
-    ]
+    chunk_size = math.ceil(num_t / num_workers)
     
     with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        list(pool.map(process_timepoint, task_args))
-    
-    # ==========================================
-    # PHASE 3: CLEANUP
-    # ==========================================
-    print("🧹 Cleaning up staged file...")
-    local_tif.unlink(missing_ok=True)
-    
+        futures = []
+        for i in range(num_workers):
+            t_start = i * chunk_size
+            t_end = min((i + 1) * chunk_size, num_t)
+            if t_start >= num_t: break
+            
+            futures.append(pool.submit(
+                process_chunk,
+                t_start, t_end, target_path, c_axis, extraction_plan,
+                top_roi, bot_roi, base_name, output_dir_base,
+                psf_map, z_step_um, args.debug, i
+            ))
+            
+        for f in futures:
+            f.result()
+            
     print("All extraction and submission complete!")
 
 if __name__ == "__main__":
