@@ -215,57 +215,45 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def cache_warmer(filepath):
-    """Reads the file sequentially in 64MB chunks to force GPFS to cache it in local RAM."""
-    try:
-        # Open raw file handle, bypassing tifffile/zarr metadata overhead
-        with open(filepath, 'rb') as f:
-            while True:
-                # 64MB sequential read. GPFS read-ahead will fly at max bandwidth (2-4 GB/s)
-                chunk = f.read(67108864) 
-                if not chunk:
-                    break
-        print("✅ Cache Warmer: File fully loaded into RAM.")
-    except Exception as e:
-        print(f"Cache Warmer error: {e}")
-
-def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
-    import tifffile, zarr, time, numpy as np
+def process_timepoint(args_tuple):
+    """
+    Pure, simple, local processing. No shared state, no network I/O.
+    The file is already in /dev/shm so tifffile will mmap it from local RAM.
+    """
+    t, local_tif, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, debug = args_tuple
+    import tifffile, zarr, time
     from pathlib import Path
     from opym.petakit import submit_pipeline_job
     
-    store = tifffile.imread(str(target_path), aszarr=True)
+    # Open the LOCAL file in RAM
+    store = tifffile.imread(str(local_tif), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    for t in range(t_start, t_end):
-        for c, is_top, laser_name, output_c in extraction_plan:
-            roi = top_roi if is_top else bot_roi
-            if not roi: continue
-            
-            shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
-            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
-            st = time.time()
-            
-            # BULK SINGLE-READ
-            if z.ndim == 5:
-                if c_axis == 1: cropped = np.array(z[t, c, :, roi[0], roi[1]])
-                else: cropped = np.array(z[t, :, c, roi[0], roi[1]])
-            else: continue
-
-            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracted in {time.time()-st:.2f}s")
-            shm_path.parent.mkdir(exist_ok=True, parents=True)
-            
-            st2 = time.time()
-            zarr.save(shm_path, cropped)
-            output_file = output_dir_base / shm_path.name
-            psf_path = psf_map.get(laser_name, None)
-            
-            submit_pipeline_job(
-                output_file=output_file, shm_path=shm_path,
-                psf_paths=[psf_path] if psf_path else None,
-                z_step_um=z_step_um, iterations=10, debug=debug
-            )
-            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written & Submitted in {time.time()-st2:.2f}s")
+    for c, is_top, laser_name, output_c in extraction_plan:
+        roi = top_roi if is_top else bot_roi
+        if not roi: continue
+        
+        shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
+        st = time.time()
+        
+        # THE SIMPLE READ - file is local RAM, no GPFS involved
+        if z.ndim == 5:
+            if c_axis == 1: cropped = z[t, c, :, roi[0], roi[1]]
+            else: cropped = z[t, :, c, roi[0], roi[1]]
+        else: continue
+        
+        shm_path.parent.mkdir(exist_ok=True, parents=True)
+        zarr.save(shm_path, cropped)
+        
+        output_file = output_dir_base / shm_path.name
+        psf_path = psf_map.get(laser_name, None)
+        
+        submit_pipeline_job(
+            output_file=output_file, shm_path=shm_path,
+            psf_paths=[psf_path] if psf_path else None,
+            z_step_um=z_step_um, iterations=10, debug=debug
+        )
+        print(f"[T={t:03d} C={output_c}] Extracted + Submitted in {time.time()-st:.2f}s")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -345,38 +333,42 @@ def main():
     
     # Clean the filename up for the workers to use
     import re
+    import shutil
+    from concurrent.futures import ProcessPoolExecutor
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    print("🔥 Starting Cache Warmer to pre-load 23GB GPFS file into 252GB RAM...")
-    warmer = mp.Process(target=cache_warmer, args=(str(target_path),))
-    warmer.start()
+    # ==========================================
+    # PHASE 1: DATA STAGING (Sequential I/O)
+    # ==========================================
+    local_tif = Path("/dev/shm/source_data_staging.ome.tif")
+    print(f"\n🚚 Staging data from GPFS to local RAM (/dev/shm)...")
+    st = time.time()
+    shutil.copyfile(target_path, local_tif)
+    print(f"✅ Staged in {time.time()-st:.2f}s. GPFS is now out of the picture.")
     
-    # CRITICAL FIX: Wait for the warmer to finish BEFORE starting workers.
-    # This guarantees the entire file is in the OS Page Cache (RAM).
-    warmer.join() 
-    
-    print("🚀 File is 100% in RAM. Starting 8 Parallel Chunked Workers...")
+    # ==========================================
+    # PHASE 2: LOCAL EXTRACTION (Random I/O on local RAM)
+    # ==========================================
+    print("🚀 Starting Parallel Local Extraction...")
     
     num_workers = min(8, mp.cpu_count() // 2)
-    import math
-    chunk_size = math.ceil(num_t / num_workers)
     
-    processes = []
-    for i in range(num_workers):
-        t_start = i * chunk_size
-        t_end = min((i + 1) * chunk_size, num_t)
-        if t_start >= num_t: break
-        
-        p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
-            z_step_um, output_dir_base, psf_map, base_name, args.debug, i
-        ))
-        p.start()
-        processes.append(p)
-        
-    for p in processes:
-        p.join()
-        
+    # Build args for each timepoint
+    task_args = [
+        (t, local_tif, c_axis, extraction_plan, top_roi, bot_roi,
+         base_name, output_dir_base, psf_map, z_step_um, args.debug)
+        for t in range(num_t)
+    ]
+    
+    with ProcessPoolExecutor(max_workers=num_workers) as pool:
+        list(pool.map(process_timepoint, task_args))
+    
+    # ==========================================
+    # PHASE 3: CLEANUP
+    # ==========================================
+    print("🧹 Cleaning up staged file...")
+    local_tif.unlink(missing_ok=True)
+    
     print("All extraction and submission complete!")
 
 if __name__ == "__main__":
