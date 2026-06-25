@@ -27,6 +27,7 @@ build-backend = "hatchling.build"
 include = [
   "run_pipeline_cli.py",
   "run_napari_opym.py",
+  "psf_tools/",
 ]
 
 [tool.uv]
