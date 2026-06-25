@@ -43,5 +43,5 @@ torchvision = [{ index = "pytorch-cuda" }]
 opym = { path = "../opym_local", editable = true }
 
 [project.scripts]
-opym-cli = "run_pipeline_cli:main"
-opym-ui = "run_napari_opym:main"
+opym = "run_pipeline_cli:main"
+naparym = "run_napari_opym:main"
