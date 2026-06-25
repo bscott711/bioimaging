@@ -229,7 +229,7 @@ def cache_warmer(filepath):
     except Exception as e:
         print(f"Cache Warmer error: {e}")
 
-def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
+def process_timepoint_worker(target_path, shared_t, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
@@ -241,9 +241,13 @@ def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_pla
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    # STRICT SEQUENTIAL LOOP over the assigned chunk
-    # This guarantees the GPFS read-ahead cache stays perfectly aligned
-    for t in range(t_start, t_end):
+    while True:
+        with shared_t.get_lock():
+            t = shared_t.value
+            if t >= num_t:
+                break
+            shared_t.value += 1
+            
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -377,34 +381,23 @@ def main():
     # Give the warmer a tiny head start to establish the sequential GPFS stream
     time.sleep(2) 
     
-    print("Starting Chunked Static Assignment...")
-    
-    # Determine optimal worker count
+    print("Starting Dynamic Convoy (Shared Counter + Bulk Reads)...")
+
     num_workers = min(8, mp.cpu_count() // 2)
-    
-    # Calculate static contiguous chunks
-    import math
-    chunk_size = math.ceil(num_t / num_workers)
-    
+    shared_t = mp.Value('i', 0) # The Dynamic Queue
+
     processes = []
     for i in range(num_workers):
-        t_start = i * chunk_size
-        t_end = min((i + 1) * chunk_size, num_t)
-        
-        # If we have more cores than timepoints, stop spawning
-        if t_start >= num_t:
-            break
-            
         p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
+            target_path, shared_t, num_t, c_axis, extraction_plan, top_roi, bot_roi,
             z_step_um, output_dir_base, psf_map, base_name, args.debug, i
         ))
         p.start()
         processes.append(p)
-        
+
     for p in processes:
         p.join()
-        
+
     # Wait for warmer (it will likely finish in ~8 seconds, long before the workers)
     warmer.join()
     print("All extraction and submission complete!")
