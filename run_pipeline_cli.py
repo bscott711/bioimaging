@@ -215,7 +215,21 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
+def cache_warmer(filepath):
+    """Reads the file sequentially in 64MB chunks to force GPFS to cache it in local RAM."""
+    try:
+        # Open raw file handle, bypassing tifffile/zarr metadata overhead
+        with open(filepath, 'rb') as f:
+            while True:
+                # 64MB sequential read. GPFS read-ahead will fly at max bandwidth (2-4 GB/s)
+                chunk = f.read(67108864) 
+                if not chunk:
+                    break
+        print("✅ Cache Warmer: File fully loaded into RAM.")
+    except Exception as e:
+        print(f"Cache Warmer error: {e}")
+
+def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
@@ -227,14 +241,9 @@ def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, 
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    # Dynamic queue guarantees workers stay clustered on adjacent timepoints
-    while True:
-        with shared_t.get_lock():
-            t = shared_t.value
-            shared_t.value += 1
-            
-        if t >= num_t:
-            break
+    # STRICT SEQUENTIAL LOOP over the assigned chunk
+    # This guarantees the GPFS read-ahead cache stays perfectly aligned
+    for t in range(t_start, t_end):
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -361,16 +370,33 @@ def main():
     import re
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
-    print("Starting Clustered Dynamic Assignment with Bulk Single-Reads...")
+    print("🔥 Starting Cache Warmer to pre-load GPFS file into 252GB RAM...")
+    warmer = mp.Process(target=cache_warmer, args=(str(target_path),))
+    warmer.start()
+    
+    # Give the warmer a tiny head start to establish the sequential GPFS stream
+    time.sleep(2) 
+    
+    print("Starting Chunked Static Assignment...")
     
     # Determine optimal worker count
     num_workers = min(8, mp.cpu_count() // 2)
-    shared_t = mp.Value('i', 0)
+    
+    # Calculate static contiguous chunks
+    import math
+    chunk_size = math.ceil(num_t / num_workers)
     
     processes = []
     for i in range(num_workers):
+        t_start = i * chunk_size
+        t_end = min((i + 1) * chunk_size, num_t)
+        
+        # If we have more cores than timepoints, stop spawning
+        if t_start >= num_t:
+            break
+            
         p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, 
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
             z_step_um, output_dir_base, psf_map, base_name, args.debug, i
         ))
         p.start()
@@ -379,6 +405,8 @@ def main():
     for p in processes:
         p.join()
         
+    # Wait for warmer (it will likely finish in ~8 seconds, long before the workers)
+    warmer.join()
     print("All extraction and submission complete!")
 
 if __name__ == "__main__":
