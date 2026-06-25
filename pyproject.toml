@@ -16,9 +16,18 @@ dependencies = [
     "pyqt6-webengine>=6.11.0",
     "tifffile<2024.8.10",
     "torch>=2.11.0",
-    "torchvision>=0.26.0",
     "zarr<3",
 ]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["run_pipeline_cli", "run_napari_opym"]
+
+[tool.uv]
+package = true
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
@@ -29,3 +38,7 @@ explicit = true
 torch = [{ index = "pytorch-cuda" }]
 torchvision = [{ index = "pytorch-cuda" }]
 opym = { path = "../opym_local", editable = true }
+
+[project.scripts]
+opym-cli = "run_pipeline_cli:main"
+opym-ui = "run_napari_opym:main"

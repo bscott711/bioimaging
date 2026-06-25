@@ -916,103 +916,106 @@ def trim_coverslip_reflection(
     return (new_data, {"name": f"{layer.name} (Trimmed)"}, "image")
 
 
+def main():
+        viewer = napari.Viewer()
+
+        viewer.add_shapes(
+            name="Crop ROIs", edge_color="red", face_color="transparent", edge_width=5
+        )
+
+        # Instantiate the pipeline widget globally so the function can access its custom layout values
+        global pipeline_widget
+        pipeline_widget = petakit_pipeline()
+        pipeline_widget.detected_z_step = None
+        pipeline_widget.manual_z_step.visible = False
+    
+        from magicgui.widgets import Container, CheckBox, Label
+        param_label = Label(value="XY: 0.136 µm | Angle: 60.0° | Z-Step: (Load Data to Auto-Detect)")
+        pipeline_widget.param_label = param_label
+        pipeline_widget.insert(0, param_label)
+    
+        # Create the checkboxes manually since we removed them from the function signature
+        from magicgui.widgets import Container, CheckBox, Label
+        save_gfp = CheckBox(value=True, name="save_gfp", text="save gfp")
+        save_calcein_violet = CheckBox(value=False, name="save_calcein_violet", text="save calcein violet")
+        save_mscarlet = CheckBox(value=False, name="save_mscarlet", text="save mscarlet")
+        save_cf647 = CheckBox(value=False, name="save_cf647", text="save cf647")
+    
+        # Attach them to the widget object so the function can find them
+        pipeline_widget.save_gfp = save_gfp
+        pipeline_widget.save_calcein_violet = save_calcein_violet
+        pipeline_widget.save_mscarlet = save_mscarlet
+        pipeline_widget.save_cf647 = save_cf647
+    
+        # Restructure save boxes into a 2x2 grid
+        space_1 = Label(value="    ")
+        space_2 = Label(value="    ")
+    
+        save_row_1 = Container(layout="horizontal", widgets=[save_gfp, space_1, save_calcein_violet], labels=False)
+        save_row_2 = Container(layout="horizontal", widgets=[save_mscarlet, space_2, save_cf647], labels=False)
+        save_grid = Container(layout="vertical", widgets=[save_row_1, save_row_2], labels=False)
+    
+        # Insert the grid before the PSF path widgets
+        idx = pipeline_widget.index(pipeline_widget.psf_gfp)
+        pipeline_widget.insert(idx, save_grid)
+    
+        # Hide all PSFs except GFP initially
+        pipeline_widget.psf_calcein_violet.visible = False
+        pipeline_widget.psf_mscarlet.visible = False
+        pipeline_widget.psf_cf647.visible = False
+    
+        # Connect visibility toggles
+        @save_gfp.changed.connect
+        def _toggle_gfp(checked: bool):
+            pipeline_widget.psf_gfp.visible = checked
+        
+        @save_calcein_violet.changed.connect
+        def _toggle_calcein(checked: bool):
+            pipeline_widget.psf_calcein_violet.visible = checked
+        
+        @save_mscarlet.changed.connect
+        def _toggle_mscarlet(checked: bool):
+            pipeline_widget.psf_mscarlet.visible = checked
+        
+        @save_cf647.changed.connect
+        def _toggle_cf647(checked: bool):
+            pipeline_widget.psf_cf647.visible = checked
+    
+        @pipeline_widget.use_omw.changed.connect
+        def _on_omw_changed(checked: bool):
+            if checked:
+                pipeline_widget.decon_iters.value = 2
+            else:
+                pipeline_widget.decon_iters.value = 25
+
+        ome_dock = viewer.window.add_dock_widget(
+            load_lazy_ome_tiff(), name="OME-TIFF Loader", area="left"
+        )
+    
+        # Move OME-TIFF Loader to the upper left, above the layer controls, and layer list at bottom
+        try:
+            from qtpy.QtCore import Qt
+            from qtpy.QtWidgets import QDockWidget
+            qt_win = viewer.window._qt_window
+            layer_controls = [d for d in qt_win.findChildren(QDockWidget) if d.objectName() == 'layer controls']
+            layer_list = [d for d in qt_win.findChildren(QDockWidget) if d.objectName() == 'layer list']
+            if layer_controls and layer_list:
+                # First split: ome_dock is top, layer_controls is bottom
+                qt_win.splitDockWidget(ome_dock, layer_controls[0], Qt.Vertical)
+                # Second split: layer_controls is top, layer_list is bottom
+                qt_win.splitDockWidget(layer_controls[0], layer_list[0], Qt.Vertical)
+        except Exception as e:
+            print(f"⚠️ Could not adjust left dock widget order: {e}")
+
+        viewer.window.add_dock_widget(
+            pipeline_widget, name="Opym PetaKit", area="right"
+        )
+
+        # viewer.window.add_dock_widget(
+        #     trim_coverslip_reflection(), name="Trim Coverslip Artifact", area="bottom"
+        # )
+
+        napari.run()
+
 if __name__ == "__main__":
-    viewer = napari.Viewer()
-
-    viewer.add_shapes(
-        name="Crop ROIs", edge_color="red", face_color="transparent", edge_width=5
-    )
-
-    # Instantiate the pipeline widget globally so the function can access its custom layout values
-    global pipeline_widget
-    pipeline_widget = petakit_pipeline()
-    pipeline_widget.detected_z_step = None
-    pipeline_widget.manual_z_step.visible = False
-    
-    from magicgui.widgets import Container, CheckBox, Label
-    param_label = Label(value="XY: 0.136 µm | Angle: 60.0° | Z-Step: (Load Data to Auto-Detect)")
-    pipeline_widget.param_label = param_label
-    pipeline_widget.insert(0, param_label)
-    
-    # Create the checkboxes manually since we removed them from the function signature
-    from magicgui.widgets import Container, CheckBox, Label
-    save_gfp = CheckBox(value=True, name="save_gfp", text="save gfp")
-    save_calcein_violet = CheckBox(value=False, name="save_calcein_violet", text="save calcein violet")
-    save_mscarlet = CheckBox(value=False, name="save_mscarlet", text="save mscarlet")
-    save_cf647 = CheckBox(value=False, name="save_cf647", text="save cf647")
-    
-    # Attach them to the widget object so the function can find them
-    pipeline_widget.save_gfp = save_gfp
-    pipeline_widget.save_calcein_violet = save_calcein_violet
-    pipeline_widget.save_mscarlet = save_mscarlet
-    pipeline_widget.save_cf647 = save_cf647
-    
-    # Restructure save boxes into a 2x2 grid
-    space_1 = Label(value="    ")
-    space_2 = Label(value="    ")
-    
-    save_row_1 = Container(layout="horizontal", widgets=[save_gfp, space_1, save_calcein_violet], labels=False)
-    save_row_2 = Container(layout="horizontal", widgets=[save_mscarlet, space_2, save_cf647], labels=False)
-    save_grid = Container(layout="vertical", widgets=[save_row_1, save_row_2], labels=False)
-    
-    # Insert the grid before the PSF path widgets
-    idx = pipeline_widget.index(pipeline_widget.psf_gfp)
-    pipeline_widget.insert(idx, save_grid)
-    
-    # Hide all PSFs except GFP initially
-    pipeline_widget.psf_calcein_violet.visible = False
-    pipeline_widget.psf_mscarlet.visible = False
-    pipeline_widget.psf_cf647.visible = False
-    
-    # Connect visibility toggles
-    @save_gfp.changed.connect
-    def _toggle_gfp(checked: bool):
-        pipeline_widget.psf_gfp.visible = checked
-        
-    @save_calcein_violet.changed.connect
-    def _toggle_calcein(checked: bool):
-        pipeline_widget.psf_calcein_violet.visible = checked
-        
-    @save_mscarlet.changed.connect
-    def _toggle_mscarlet(checked: bool):
-        pipeline_widget.psf_mscarlet.visible = checked
-        
-    @save_cf647.changed.connect
-    def _toggle_cf647(checked: bool):
-        pipeline_widget.psf_cf647.visible = checked
-    
-    @pipeline_widget.use_omw.changed.connect
-    def _on_omw_changed(checked: bool):
-        if checked:
-            pipeline_widget.decon_iters.value = 2
-        else:
-            pipeline_widget.decon_iters.value = 25
-
-    ome_dock = viewer.window.add_dock_widget(
-        load_lazy_ome_tiff(), name="OME-TIFF Loader", area="left"
-    )
-    
-    # Move OME-TIFF Loader to the upper left, above the layer controls, and layer list at bottom
-    try:
-        from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import QDockWidget
-        qt_win = viewer.window._qt_window
-        layer_controls = [d for d in qt_win.findChildren(QDockWidget) if d.objectName() == 'layer controls']
-        layer_list = [d for d in qt_win.findChildren(QDockWidget) if d.objectName() == 'layer list']
-        if layer_controls and layer_list:
-            # First split: ome_dock is top, layer_controls is bottom
-            qt_win.splitDockWidget(ome_dock, layer_controls[0], Qt.Vertical)
-            # Second split: layer_controls is top, layer_list is bottom
-            qt_win.splitDockWidget(layer_controls[0], layer_list[0], Qt.Vertical)
-    except Exception as e:
-        print(f"⚠️ Could not adjust left dock widget order: {e}")
-
-    viewer.window.add_dock_widget(
-        pipeline_widget, name="Opym PetaKit", area="right"
-    )
-
-    # viewer.window.add_dock_widget(
-    #     trim_coverslip_reflection(), name="Trim Coverslip Artifact", area="bottom"
-    # )
-
-    napari.run()
+    main()
