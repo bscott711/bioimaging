@@ -20,11 +20,14 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools]
-py-modules = ["run_pipeline_cli", "run_napari_opym"]
+[tool.hatch.build]
+include = [
+  "run_pipeline_cli.py",
+  "run_napari_opym.py",
+]
 
 [tool.uv]
 package = true
