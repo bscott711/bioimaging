@@ -240,7 +240,7 @@ def process_timepoint_range(target_path, t_start, t_end, c_axis, extraction_plan
             
             # Throttle so we don't fill up /dev/shm
             shm_dir = Path("/dev/shm/opym_jobs")
-            while shm_dir.exists() and len(list(shm_dir.glob("*.tif"))) > 100:
+            while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
                 time.sleep(1)
                 
             print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
