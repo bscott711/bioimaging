@@ -215,30 +215,21 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, debug=False, worker_id=0):
+def process_timepoint_worker(target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, base_name, debug=False, worker_id=0):
     import tifffile
     import zarr
     import time
     import numpy as np
     from pathlib import Path
-    import re
     from opym.petakit import submit_pipeline_job
     
     # Each process MUST open its own independent file handle!
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    # Clean the filename up, e.g. "cell_MMStack_Pos0_47.ome" -> "cell_MMStack_Pos0"
-    base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
-    
-    while True:
-        with shared_t.get_lock():
-            t = shared_t.value
-            shared_t.value += 1
-            
-        if t >= num_t:
-            break
-            
+    # STRICT SEQUENTIAL LOOP over the assigned chunk
+    # This guarantees the GPFS read-ahead cache stays perfectly aligned
+    for t in range(t_start, t_end):
         for c, is_top, laser_name, output_c in extraction_plan:
             roi = top_roi if is_top else bot_roi
             if not roi: continue
@@ -248,30 +239,26 @@ def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, 
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracting {laser_name}...")
             st = time.time()
             
-            import concurrent.futures
-            # Correctly slice the dimensions to yield (Z, Y, X)
+            # --- THE BULK SINGLE-READ FIX ---
+            # Replaces the 16-thread ThreadPoolExecutor hammer.
+            # By asking for the entire Z-stack (:) at once, tifffile/zarr will 
+            # optimize this into sequential byte-range reads.
             if z.ndim == 5:
                 if c_axis == 1:
-                    num_z = z.shape[2]
-                    def fetch_z(z_idx): return z[t, c, z_idx, roi[0], roi[1]]
+                    cropped = np.array(z[t, c, :, roi[0], roi[1]])
                 else:
-                    num_z = z.shape[1]
-                    def fetch_z(z_idx): return z[t, z_idx, c, roi[0], roi[1]]
-                    
-                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as tpe:
-                    slices = list(tpe.map(fetch_z, range(num_z)))
-                cropped = np.stack(slices, axis=0)
+                    cropped = np.array(z[t, :, c, roi[0], roi[1]])
             else:
-                return
+                print(f"Warning: Unexpected Zarr dimensions {z.shape}. Skipping.")
+                continue
 
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
                 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
-            cropped_mem = np.array(cropped)
             
             print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
             st2 = time.time()
-            zarr.save(shm_path, cropped_mem)
+            zarr.save(shm_path, cropped)
             
             output_dir = output_dir_base
             output_dir.mkdir(exist_ok=True, parents=True)
@@ -287,8 +274,7 @@ def process_timepoint_worker(target_path, shared_t, num_workers, num_t, c_axis, 
                 iterations=10,
                 debug=debug
             )
-            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
-            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Job Submitted!")
+            print(f"[Worker {worker_id:02d}] [{t:03d}:{output_c}] Written & Submitted in {time.time()-st2:.2f}s")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
@@ -366,15 +352,31 @@ def main():
     del z
     del store
     
-    print("Starting dynamically-scheduled multi-process extraction to keep GPFS read-ahead tight...")
+    # Clean the filename up for the workers to use
+    import re
+    base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
+    print("Starting Chunked Static Assignment with Bulk Reads...")
+    
+    # Determine optimal worker count
     num_workers = min(8, mp.cpu_count() // 2)
-    shared_t = mp.Value('i', 0)
+    
+    # Calculate static contiguous chunks
+    import math
+    chunk_size = math.ceil(num_t / num_workers)
     
     processes = []
     for i in range(num_workers):
+        t_start = i * chunk_size
+        t_end = min((i + 1) * chunk_size, num_t)
+        
+        # If we have more cores than timepoints, stop spawning
+        if t_start >= num_t:
+            break
+            
         p = mp.Process(target=process_timepoint_worker, args=(
-            target_path, shared_t, num_workers, num_t, c_axis, extraction_plan, top_roi, bot_roi, z_step_um, output_dir_base, psf_map, args.debug, i
+            target_path, t_start, t_end, c_axis, extraction_plan, top_roi, bot_roi, 
+            z_step_um, output_dir_base, psf_map, base_name, args.debug, i
         ))
         p.start()
         processes.append(p)
