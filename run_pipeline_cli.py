@@ -262,12 +262,12 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
             else:
                 return
 
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
+            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Extracted {cropped.shape} in {time.time()-st:.2f}s")
                 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
             cropped_mem = np.array(cropped)
             
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
+            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Writing to {shm_path}...")
             st2 = time.time()
             zarr.save(shm_path, cropped_mem)
             
@@ -285,8 +285,8 @@ def process_timepoint_range(target_path, t_start, num_t, t_step, c_axis, extract
                 iterations=10,
                 debug=debug
             )
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
-            print(f"[Worker T{t_start:03d}-{t_end-1:03d}] [{t:03d}:{output_c}] Job Submitted!")
+            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Written in {time.time()-st2:.2f}s")
+            print(f"[Worker {t_start:02d}] [{t:03d}:{output_c}] Job Submitted!")
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End GPU Pipeline CLI")
