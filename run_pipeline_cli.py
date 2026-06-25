@@ -232,11 +232,6 @@ def process_timepoint_worker(target_path, shared_t, num_t, c_axis, extraction_pl
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
     while True:
-        # Throttle BEFORE taking a timepoint so they don't lock in future timepoints and wake up out of order
-        shm_dir = Path("/dev/shm/opym_jobs")
-        while shm_dir.exists() and len(list(shm_dir.glob("*.zarr"))) > 100:
-            time.sleep(1)
-
         with shared_t.get_lock():
             t = shared_t.value
             shared_t.value += 1
