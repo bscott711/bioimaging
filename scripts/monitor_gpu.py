@@ -59,7 +59,7 @@ def main(duration_seconds=600):
     ax1.plot(times, gpu1_util, label="GPU 1 Compute", color='orange')
     ax1.set_ylabel("Compute Utilization (%)")
     ax1.set_title("GPU Compute & VRAM Usage Over Time")
-    ax1.set_ylim(0, 100)
+    ax1.set_ylim(0, 105)
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper right')
     
@@ -74,9 +74,9 @@ def main(duration_seconds=600):
     ax2.legend(loc='upper right')
     
     plt.tight_layout()
-    output_file = "/home/SDSMT.LOCAL/bscott/.gemini/antigravity-ide/brain/1e96a6cd-54a2-4fc1-b442-accbe54e4143/gpu_metrics_over_time.png"
+    output_file = "/home/SDSMT.LOCAL/bscott/projects/bioimaging/data/gpu_metrics_over_time.png"
     plt.savefig(output_file)
     print(f"Plot saved to: {output_file}")
 
 if __name__ == "__main__":
-    main(duration_seconds=180)
+    main(duration_seconds=300)

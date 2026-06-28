@@ -1,0 +1,357 @@
+nohup: ignoring input
+[Server] Warning: PETAKIT_ROOT not set. Using default: /cm/shared/apps_local/petakit5d
+[Server] Warning: PETAKIT_ROOT not set. Using default: /cm/shared/apps_local/petakit5d
+[Server] ⚠️ OPYM_PYTHON not set. Falling back to system python: ~/projects/bioimaging/.venv/bin/python
+[Server] ⚠️ OPYM_PYTHON not set. Falling back to system python: ~/projects/bioimaging/.venv/bin/python
+Hostname: micro001 
+Hostname: micro001 
+Add matlab libraries to path...
+Add matlab libraries to path...
+⚠️  readtiff -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/readtiff.m)
+⚠️  writetiff -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/writetiff.m)
+⚠️  readtiff -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/readtiff.m)
+⚠️  readzarr -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/readzarr.m)
+⚠️  writetiff -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/writetiff.m)
+⚠️  writezarr -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/writezarr.m)
+⚠️  readzarr -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/readzarr.m)
+⚠️  writezarr -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/io/writezarr.m)
+✅ createZarrFile -> C++ MEX
+✅ createZarrFile -> C++ MEX
+✅ parallelReadTiff -> C++ MEX
+✅ parallelReadTiff -> C++ MEX
+✅ parallelWriteTiff -> C++ MEX
+✅ parallelWriteTiff -> C++ MEX
+✅ parallelReadZarr -> C++ MEX
+✅ parallelReadZarr -> C++ MEX
+✅ parallelWriteZarr -> C++ MEX
+✅ parallelWriteZarr -> C++ MEX
+⚠️  deskewRotateFrame3D -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/deskew_rotate/deskewRotateFrame3D.m)
+⚠️  deskewRotateFrame3D -> MATLAB fallback (/mmfs2/cm/shared/apps_local/petakit5d/microscopeDataProcessing/deskew_rotate/deskewRotateFrame3D.m)
+✅ skewed_space_interp_defined_stepsize_mex -> C++ MEX
+✅ skewed_space_interp_defined_stepsize_mex -> C++ MEX
+✅ volume_deskew_rotate_warp_mex -> C++ MEX
+
+⚠️  Some MEX accelerators are missing. Performance may be degraded.
+✅ volume_deskew_rotate_warp_mex -> C++ MEX
+
+⚠️  Some MEX accelerators are missing. Performance may be degraded.
+[Warning: Recompiling GPU libraries because your device is more recent than the
+libraries. Compilation can take several minutes.] 
+[Warning: Recompiling GPU libraries because your device is more recent than the
+libraries. Compilation can take several minutes.] 
+[> In parallel.internal.gpu.selectDevice
+In parallel.gpu.GPUDevice.select (line 60)
+In gpuDevice (line 21)
+In run_petakit_server (line 81)] 
+[> In parallel.internal.gpu.selectDevice
+In parallel.gpu.GPUDevice.select (line 60)
+In gpuDevice (line 21)
+In run_petakit_server (line 81)] 
+[Server] 🎮 Locked to GPU 1: NVIDIA RTX PRO 6000 Blackwell Server Edition (Available vRAM: 100.5 GB)
+[Server] 🎮 Locked to GPU 1: NVIDIA RTX PRO 6000 Blackwell Server Edition (Available vRAM: 100.8 GB)
+Starting parallel pool (parpool) using the 'Processes' profile ...
+Starting parallel pool (parpool) using the 'Processes' profile ...
+Connected to parallel pool with 10 workers.
+Connected to parallel pool with 10 workers.
+[Server] Ready. Watching: /dev/shm/petakit_jobs/queue
+[Server] Ready. Watching: /dev/shm/petakit_jobs/queue
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0078_C0.zarr_1782616300996.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0078_C0.zarr_1782616300996.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0000_C0.zarr_1782616302984.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0000_C0.zarr_1782616302984.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0013_C0.zarr_1782616303047.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0026_C0.zarr_1782616302564.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0013_C0.zarr_1782616303047.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0039_C0.zarr_1782616302245.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0065_C0.zarr_1782616302338.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0026_C0.zarr_1782616302564.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0091_C0.zarr_1782616303074.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0039_C0.zarr_1782616302245.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0091_C0.zarr_1782616303074.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0052_C0.zarr_1782616303665.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0065_C0.zarr_1782616302338.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0052_C0.zarr_1782616303665.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0079_C0.zarr_1782616305664.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0079_C0.zarr_1782616305664.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0027_C0.zarr_1782616307424.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0027_C0.zarr_1782616307424.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0001_C0.zarr_1782616309329.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0014_C0.zarr_1782616309481.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0040_C0.zarr_1782616309259.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0014_C0.zarr_1782616309481.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0066_C0.zarr_1782616309219.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0001_C0.zarr_1782616309329.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0040_C0.zarr_1782616309259.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0066_C0.zarr_1782616309219.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0053_C0.zarr_1782616310175.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0092_C0.zarr_1782616310547.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0053_C0.zarr_1782616310175.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0092_C0.zarr_1782616310547.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0080_C0.zarr_1782616313014.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0080_C0.zarr_1782616313014.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0002_C0.zarr_1782616316097.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0041_C0.zarr_1782616316094.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0067_C0.zarr_1782616316040.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0002_C0.zarr_1782616316097.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0041_C0.zarr_1782616316094.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0067_C0.zarr_1782616316040.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0015_C0.zarr_1782616316279.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0028_C0.zarr_1782616316296.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0015_C0.zarr_1782616316279.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0028_C0.zarr_1782616316296.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0054_C0.zarr_1782616317004.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0093_C0.zarr_1782616317450.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0054_C0.zarr_1782616317004.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0093_C0.zarr_1782616317450.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0081_C0.zarr_1782616321436.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0081_C0.zarr_1782616321436.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0003_C0.zarr_1782616323528.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0016_C0.zarr_1782616323001.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0029_C0.zarr_1782616323633.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0003_C0.zarr_1782616323528.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0016_C0.zarr_1782616323001.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0042_C0.zarr_1782616322960.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0055_C0.zarr_1782616324408.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0068_C0.zarr_1782616322857.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0029_C0.zarr_1782616323633.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0094_C0.zarr_1782616324412.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0042_C0.zarr_1782616322960.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0055_C0.zarr_1782616324408.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0068_C0.zarr_1782616322857.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0094_C0.zarr_1782616324412.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0082_C0.zarr_1782616327737.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0082_C0.zarr_1782616327737.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0004_C0.zarr_1782616330455.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0017_C0.zarr_1782616329880.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0030_C0.zarr_1782616330625.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0004_C0.zarr_1782616330455.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0017_C0.zarr_1782616329880.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0043_C0.zarr_1782616329891.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0069_C0.zarr_1782616329703.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0030_C0.zarr_1782616330625.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0043_C0.zarr_1782616329891.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0069_C0.zarr_1782616329703.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0056_C0.zarr_1782616331349.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0095_C0.zarr_1782616331341.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0056_C0.zarr_1782616331349.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0095_C0.zarr_1782616331341.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0083_C0.zarr_1782616334652.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0083_C0.zarr_1782616334652.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0044_C0.zarr_1782616336939.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0070_C0.zarr_1782616336647.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0018_C0.zarr_1782616337165.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0044_C0.zarr_1782616336939.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0070_C0.zarr_1782616336647.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0018_C0.zarr_1782616337165.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0005_C0.zarr_1782616337301.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0005_C0.zarr_1782616337301.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0031_C0.zarr_1782616337448.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0031_C0.zarr_1782616337448.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0057_C0.zarr_1782616338114.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0096_C0.zarr_1782616338451.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0057_C0.zarr_1782616338114.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0096_C0.zarr_1782616338451.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0084_C0.zarr_1782616341549.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0084_C0.zarr_1782616341549.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0071_C0.zarr_1782616343517.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0071_C0.zarr_1782616343517.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0045_C0.zarr_1782616343874.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0045_C0.zarr_1782616343874.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0019_C0.zarr_1782616344033.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0019_C0.zarr_1782616344033.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0006_C0.zarr_1782616344168.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0006_C0.zarr_1782616344168.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0032_C0.zarr_1782616344289.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0032_C0.zarr_1782616344289.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0058_C0.zarr_1782616344925.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0058_C0.zarr_1782616344925.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0097_C0.zarr_1782616345265.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0097_C0.zarr_1782616345265.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0085_C0.zarr_1782616349457.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0085_C0.zarr_1782616349457.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0046_C0.zarr_1782616350508.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0046_C0.zarr_1782616350508.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0020_C0.zarr_1782616350647.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0020_C0.zarr_1782616350647.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0072_C0.zarr_1782616350166.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0072_C0.zarr_1782616350166.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0007_C0.zarr_1782616351379.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0033_C0.zarr_1782616351202.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0007_C0.zarr_1782616351379.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0033_C0.zarr_1782616351202.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0098_C0.zarr_1782616352226.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0098_C0.zarr_1782616352226.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0059_C0.zarr_1782616353938.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0059_C0.zarr_1782616353938.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0073_C0.zarr_1782616357118.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0073_C0.zarr_1782616357118.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0047_C0.zarr_1782616357443.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0086_C0.zarr_1782616356161.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0047_C0.zarr_1782616357443.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0021_C0.zarr_1782616357623.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0086_C0.zarr_1782616356161.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0021_C0.zarr_1782616357623.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0008_C0.zarr_1782616358324.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0008_C0.zarr_1782616358324.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0034_C0.zarr_1782616358130.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0099_C0.zarr_1782616358913.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0034_C0.zarr_1782616358130.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0099_C0.zarr_1782616358913.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0060_C0.zarr_1782616360355.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0060_C0.zarr_1782616360355.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0087_C0.zarr_1782616362516.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0087_C0.zarr_1782616362516.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0048_C0.zarr_1782616363922.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0048_C0.zarr_1782616363922.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0009_C0.zarr_1782616364767.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0022_C0.zarr_1782616364259.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0035_C0.zarr_1782616364607.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0009_C0.zarr_1782616364767.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0022_C0.zarr_1782616364259.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0035_C0.zarr_1782616364607.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0074_C0.zarr_1782616364620.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0074_C0.zarr_1782616364620.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0061_C0.zarr_1782616366802.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0061_C0.zarr_1782616366802.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0088_C0.zarr_1782616369266.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0088_C0.zarr_1782616369266.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0010_C0.zarr_1782616371133.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0023_C0.zarr_1782616370492.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0036_C0.zarr_1782616370908.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0049_C0.zarr_1782616370259.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0010_C0.zarr_1782616371133.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0075_C0.zarr_1782616370939.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0023_C0.zarr_1782616370492.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0036_C0.zarr_1782616370908.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0049_C0.zarr_1782616370259.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0075_C0.zarr_1782616370939.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0062_C0.zarr_1782616372684.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0062_C0.zarr_1782616372684.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0024_C0.zarr_1782616375818.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0050_C0.zarr_1782616375636.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0089_C0.zarr_1782616374991.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0024_C0.zarr_1782616375818.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0050_C0.zarr_1782616375636.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0089_C0.zarr_1782616374991.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0076_C0.zarr_1782616377780.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0076_C0.zarr_1782616377780.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0011_C0.zarr_1782616379863.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0037_C0.zarr_1782616379093.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0063_C0.zarr_1782616379454.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0011_C0.zarr_1782616379863.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0037_C0.zarr_1782616379093.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0063_C0.zarr_1782616379454.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0025_C0.zarr_1782616382027.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0051_C0.zarr_1782616382655.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0090_C0.zarr_1782616381224.json
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0025_C0.zarr_1782616382027.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0051_C0.zarr_1782616382655.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0090_C0.zarr_1782616381224.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0038_C0.zarr_1782616383622.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0064_C0.zarr_1782616383909.json
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0077_C0.zarr_1782616383399.json
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0038_C0.zarr_1782616383622.json to background worker.
+         Type: Unified GPU Pipeline (RAM Disk)
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0064_C0.zarr_1782616383909.json to background worker.
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0077_C0.zarr_1782616383399.json to background worker.
+[Server] >>> Processing job: PIPELINE_Cell_1_MMStack_Pos0.ome_T0012_C0.zarr_1782616385033.json
+         Type: Unified GPU Pipeline (RAM Disk)
+[Server] <<< Dispatched PIPELINE_Cell_1_MMStack_Pos0.ome_T0012_C0.zarr_1782616385033.json to background worker.

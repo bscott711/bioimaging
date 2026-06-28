@@ -72,31 +72,15 @@ def auto_detect_rois(z, master_roi_path=None):
     half_y = max_y // 2
     
     def _find_half_roi(image_half, offset_y=0):
-        if np.max(image_half) < 300:
-            return None
-        smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=5)
-        thresh = np.mean(smoothed) + 2 * np.std(smoothed)
-        mask = smoothed > thresh
-        labels = skimage.measure.label(mask)
-        props = skimage.measure.regionprops(labels)
-        if not props: return None
+        # Apply massive blur to turn the image into a smooth heat map
+        smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=20)
         
-        min_row, min_col, max_row, max_col = image_half.shape[0], image_half.shape[1], 0, 0
-        found = False
-        for p in props:
-            if p.area > 500:
-                r0, c0, r1, c1 = p.bbox
-                min_row, min_col = min(min_row, r0), min(min_col, c0)
-                max_row, max_col = max(max_row, r1), max(max_col, c1)
-                found = True
-                
-        if not found: return None
+        # Find the coordinates of the absolute maximum intensity
+        y_peak, x_peak = np.unravel_index(np.argmax(smoothed, axis=None), smoothed.shape)
         
         return {
-            "ymin": min_row + offset_y,
-            "ymax": max_row + offset_y,
-            "xmin": min_col,
-            "xmax": max_col
+            "y_center": int(y_peak + offset_y),
+            "x_center": int(x_peak)
         }
 
     top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0)
@@ -106,15 +90,12 @@ def auto_detect_rois(z, master_roi_path=None):
     rois_out = []
     
     if valid_rois:
-        detected_max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
-        detected_max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
-        
         EXPECTED_H = 576
         EXPECTED_W = 1152
             
         import scipy.fft
-        max_h = scipy.fft.next_fast_len(max(detected_max_h, EXPECTED_H))
-        max_w = scipy.fft.next_fast_len(max(detected_max_w, EXPECTED_W))
+        max_h = scipy.fft.next_fast_len(EXPECTED_H)
+        max_w = scipy.fft.next_fast_len(EXPECTED_W)
         
         if master_roi_path:
             try:
@@ -127,8 +108,8 @@ def auto_detect_rois(z, master_roi_path=None):
                 rois_out.append(None)
                 continue
                 
-            y_center = (r_dict["ymin"] + r_dict["ymax"]) // 2
-            x_center = (r_dict["xmin"] + r_dict["xmax"]) // 2
+            y_center = r_dict["y_center"]
+            x_center = r_dict["x_center"]
             
             new_ymin = max(0, y_center - max_h // 2)
             new_ymax = new_ymin + max_h
@@ -225,8 +206,8 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
     from pathlib import Path
     from opym.petakit import submit_pipeline_job
     
-    # Open the multi-file Zarr store ONCE per worker.
-    # tifffile handles the 94-file routing automatically.
+    # Note: tifffile memory-maps by default when possible. The boundary delays
+    # are due to GPFS file open/close token overhead when crossing 4GB splits.
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
@@ -344,8 +325,6 @@ def main():
     base_name = re.sub(r'_\d+\.ome$', '', target_path.stem)
     
     print(f"\n🚀 Starting Direct GPFS Streaming (8 Workers)...")
-    print(f"⚠️  Note: First timepoint per worker may take ~30-45s (OME-XML metadata parse).")
-    print(f"⚠️  Subsequent timepoints will fly at < 1s.")
     
     num_workers = min(8, mp.cpu_count() // 2)
     chunk_size = math.ceil(num_t / num_workers)

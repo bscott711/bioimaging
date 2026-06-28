@@ -6,7 +6,7 @@ from pathlib import Path
 # Known fluorophore patterns and their standardized names
 FLUOROPHORES = {
     r'mng|ng|gfp|calcein': 'GFP/mNG (488)',
-    r'msca|msc|scarlet|568': 'mScarlet/CF568 (561)',
+    r'msca|msc|scarlet|568|tdtomato|tdtom': 'mScarlet/CF568/TdTomato (561)',
     r'cf647|647|sir': 'CF647/SiR (640)',
     r'hoechst|dapi|violet': 'Hoechst/Violet (405)',
     r'beads|yg': 'YG Beads (488 nm excitation)',
