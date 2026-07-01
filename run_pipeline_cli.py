@@ -232,7 +232,17 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
             extract_time = time.time() - st
 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
-            zarr.save(shm_path, orient_zyx_for_dsr(cropped))
+            oriented = orient_zyx_for_dsr(cropped)
+            # This is a write-once/read-once-wholesale staging file -- MATLAB's
+            # readzarr() always reads the whole array back (run_gpu_pipeline.m).
+            # Store it as a single chunk instead of zarr's default multi-chunk
+            # heuristic, to skip unneeded chunk-coordination/decompression
+            # overhead for data that's never partially accessed.
+            # NOTE: zarr.save() silently routes to save_group() (not
+            # save_array()) whenever *any* kwarg is passed -- even chunks= --
+            # which would nest this under an arr_0 group entry instead of
+            # writing a plain array. Must call save_array() directly.
+            zarr.save_array(shm_path, oriented, chunks=oriented.shape)
 
             output_file = output_dir_base / shm_path.name
             psf_path = psf_map.get(laser_name, None)
