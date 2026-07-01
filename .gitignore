@@ -23,3 +23,7 @@ petakit_jobs/
 *.swp
 *.swo
 *~
+
+# Logs
+nohup.out
+*.log
