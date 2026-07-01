@@ -211,11 +211,17 @@ def extract_average_psf(
     radius_xy: int = 15,
     normalize: bool = True,
     rotate_90: bool = True,
+    dz_psf: float = 0.1,
     save_path: Path = Path("./averaged_psf.tif"),
 ):
     """
-    Extracts crops around each point, aligns them by center of mass, 
+    Extracts crops around each point, aligns them by center of mass,
     normalizes energy, and averages them to create a master PSF.
+
+    dz_psf is the z-step (in microns) the PSF bead stack was acquired at.
+    It is saved into the output tiff's metadata (ImageJ 'spacing' tag) so
+    downstream deconvolution can resample the PSF to match a given
+    dataset's actual z-step instead of silently assuming they match.
     """
     if image_layer is None or points_layer is None:
         print("Please provide both an Image and Points layer.")
@@ -382,8 +388,13 @@ def extract_average_psf(
 
     # Save the result
     if save_path.parent.exists() or save_path.parent == Path(""):
-        tifffile.imwrite(save_path, avg_psf.astype(np.float32))
-        print(f"Saved averaged PSF to {save_path.absolute()}")
+        tifffile.imwrite(
+            save_path,
+            avg_psf.astype(np.float32),
+            imagej=True,
+            metadata={"spacing": dz_psf, "unit": "um"},
+        )
+        print(f"Saved averaged PSF to {save_path.absolute()} (dz_psf={dz_psf} um)")
     else:
         print(f"Warning: Directory {save_path.parent} does not exist. Not saving.")
 

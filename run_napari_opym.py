@@ -13,8 +13,6 @@ import dask.array as da
 
 from opym.petakit import (
     submit_remote_crop_job,
-    submit_remote_deskew_job,
-    submit_remote_decon_job,
     submit_pipeline_job,
     wait_for_job,
 )
@@ -332,8 +330,10 @@ def _process_chunk_worker(t, c, is_top, roi, base_file, output_dir, psf_file, z_
     else:
         raise RuntimeError(f"❌ Extraction failed! Expected lazy_array to be 4D or 5D, but got {z.ndim}D array with shape {z.shape}.")
 
+    from opym.utils import orient_zyx_for_dsr
+
     shm_path.parent.mkdir(exist_ok=True, parents=True)
-    zarr.save(shm_path, np.array(cropped))
+    zarr.save(shm_path, orient_zyx_for_dsr(np.array(cropped)))
     
     out_sub_dir.mkdir(exist_ok=True, parents=True)
     output_file = out_sub_dir / shm_path.name
