@@ -241,7 +241,7 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
                 output_file=output_file, shm_path=shm_path,
                 psf_paths=[psf_path] if psf_path else None,
                 z_step_um=z_step_um, dz_psf=psf_dz_um if psf_path else None,
-                iterations=10, debug=debug
+                debug=debug,  # let the MATLAB-side default (25 iters for RLMethod='simple') apply
             )
             
             print(f"[Worker {worker_id:02d}] T={t:03d} C={output_c} | Extract: {extract_time:.2f}s")
