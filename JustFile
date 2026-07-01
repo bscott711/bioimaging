@@ -1,0 +1,14 @@
+dcv:
+    dcv create-session bioimaging
+
+wait-for-dcv:
+    @echo "Polling for DCV license every 5 minutes..."
+    @while true; do \
+        if dcv create-session bioimaging 2>/dev/null; then \
+            echo "✅ Session 'bioimaging' created successfully!"; \
+            break; \
+        else \
+            echo "❌ No licenses available. Retrying in 5 minutes..."; \
+            sleep 300; \
+        fi \
+    done
