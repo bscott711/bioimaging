@@ -10,15 +10,29 @@ dependencies = [
     "matlabengine==24.2.*",
     "matplotlib>=3.10.9",
     "napari[all]>=0.7.0",
+    "napari-ome-zarr<0.7",
     "ndv[qt,vispy]>=0.5.0",
     "opym",
     "pypetakit5d>=1.4.6",
     "pyqt6-webengine>=6.11.0",
     "tifffile<2024.8.10",
     "torch>=2.11.0",
-    "torchvision>=0.26.0",
     "zarr<3",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+  "run_pipeline_cli.py",
+  "run_napari_opym.py",
+  "psf_tools/",
+]
+
+[tool.uv]
+package = true
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
@@ -29,3 +43,8 @@ explicit = true
 torch = [{ index = "pytorch-cuda" }]
 torchvision = [{ index = "pytorch-cuda" }]
 opym = { path = "../opym_local", editable = true }
+
+[project.scripts]
+opym = "run_pipeline_cli:main"
+naparym = "run_napari_opym:main"
+opym-serve = "opym.local_gpu_worker:main"

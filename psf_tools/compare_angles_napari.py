@@ -1,5 +1,6 @@
 import napari
 import tifffile
+import zarr
 import numpy as np
 from pathlib import Path
 from magicgui import magicgui
@@ -28,20 +29,20 @@ def overlay_angles(angle_1: float, angle_2: float, angle_3: float):
     dir_2 = sweep_dir_rotate / f'Angle_{angle_2}' / 'DSR'
     dir_3 = sweep_dir_rotate / f'Angle_{angle_3}' / 'DSR'
     
-    files_1 = list(dir_1.glob('*.tif'))
-    files_2 = list(dir_2.glob('*.tif'))
-    files_3 = list(dir_3.glob('*.tif'))
+    files_1 = list(dir_1.glob('*.zarr'))
+    files_2 = list(dir_2.glob('*.zarr'))
+    files_3 = list(dir_3.glob('*.zarr'))
     
     if not files_1 or not files_2 or not files_3:
         print(f"Error: Missing DSR data for one of the selected angles.")
         return
         
     print(f"Loading Angle {angle_1}...")
-    data_1 = tifffile.imread(files_1[0])
+    data_1 = zarr.open(files_1[0], mode='r')[:]
     print(f"Loading Angle {angle_2}...")
-    data_2 = tifffile.imread(files_2[0])
+    data_2 = zarr.open(files_2[0], mode='r')[:]
     print(f"Loading Angle {angle_3}...")
-    data_3 = tifffile.imread(files_3[0])
+    data_3 = zarr.open(files_3[0], mode='r')[:]
     
     # Clear existing layers
     viewer.layers.clear()
