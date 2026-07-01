@@ -16,6 +16,7 @@ import sys
 sys.path.append(str(Path.home() / "projects" / "opym_local" / "src"))
 from opym.petakit import submit_pipeline_job
 from opym.consolidate import consolidate_to_ome_zarr
+from opym.utils import orient_zyx_for_dsr
 
 def auto_detect_rois(z_array, master_roi_path=None):
     print("\n🔍 Auto-detecting ROIs from T=0...")
@@ -196,7 +197,7 @@ def get_extraction_plan(target_path: Path):
             
     return plan
 
-def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, debug, worker_id):
+def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, psf_dz_um, debug, worker_id):
     """
     Process a contiguous chunk of timepoints directly from GPFS.
     Opens the multi-file Zarr store ONCE (paying a one-time metadata tax),
@@ -205,6 +206,7 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
     import tifffile, zarr, time, numpy as np
     from pathlib import Path
     from opym.petakit import submit_pipeline_job
+    from opym.utils import orient_zyx_for_dsr
     
     # Note: tifffile memory-maps by default when possible. The boundary delays
     # are due to GPFS file open/close token overhead when crossing 4GB splits.
@@ -230,15 +232,16 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
             extract_time = time.time() - st
 
             shm_path.parent.mkdir(exist_ok=True, parents=True)
-            zarr.save(shm_path, cropped)
-            
+            zarr.save(shm_path, orient_zyx_for_dsr(cropped))
+
             output_file = output_dir_base / shm_path.name
             psf_path = psf_map.get(laser_name, None)
-            
+
             submit_pipeline_job(
                 output_file=output_file, shm_path=shm_path,
                 psf_paths=[psf_path] if psf_path else None,
-                z_step_um=z_step_um, iterations=10, debug=debug
+                z_step_um=z_step_um, dz_psf=psf_dz_um if psf_path else None,
+                iterations=10, debug=debug
             )
             
             print(f"[Worker {worker_id:02d}] T={t:03d} C={output_c} | Extract: {extract_time:.2f}s")
@@ -255,6 +258,9 @@ def main():
                         help="Skip pipeline; consolidate existing Decon/*.zarr files into a single OME-Zarr")
     parser.add_argument("--xy-pixel-um", type=float, default=0.136,
                         help="XY pixel size in µm for OME-Zarr metadata (default: 0.136)")
+    parser.add_argument("--psf-dz-um", type=float, default=0.1,
+                        help="Z-step (µm) the PSF file was acquired at, used to resample the PSF "
+                             "to this dataset's z-geometry before deconvolution (default: 0.1)")
     parser.add_argument("--channel-names", type=str, nargs="+", default=[],
                         help="Channel labels for OME-Zarr metadata, e.g. --channel-names GFP mScarlet")
     args = parser.parse_args()
@@ -411,7 +417,7 @@ def main():
                 process_chunk,
                 t_start, t_end, target_path, c_axis, extraction_plan,
                 top_roi, bot_roi, base_name, output_dir_base,
-                psf_map, z_step_um, args.debug, i
+                psf_map, z_step_um, args.psf_dz_um, args.debug, i
             ))
 
         for f in futures:
