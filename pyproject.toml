@@ -44,6 +44,11 @@ torch = [{ index = "pytorch-cuda" }]
 torchvision = [{ index = "pytorch-cuda" }]
 opym = { path = "../opym_local", editable = true }
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
 [project.scripts]
 opym = "run_pipeline_cli:main"
 naparym = "run_napari_opym:main"
