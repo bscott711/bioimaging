@@ -21,9 +21,11 @@ from opym.utils import orient_zyx_for_dsr
 # Max (timepoint, channel) frames bundled into one pipeline_batch ticket.
 # Frames are grouped by PSF (laser/channel) first, then batched across
 # consecutive timepoints up to this size -- see the performance plan's
-# Phase 2. Deliberately a named, tunable constant: expected to be retuned
-# after real production wall-clock measurements.
-MAX_BATCH_SIZE = 8
+# Phase 2. Deliberately a named, tunable constant: raised from the initial
+# default of 8 to 30 to measure whether amortizing per-ticket overhead
+# further is worth the larger failure blast-radius and coarser progress
+# granularity (see Phase 2.3's real-data timing).
+MAX_BATCH_SIZE = 30
 
 def auto_detect_rois(z_array, master_roi_path=None):
     print("\n🔍 Auto-detecting ROIs from T=0...")
