@@ -14,9 +14,16 @@ import multiprocessing as mp
 import sys
 # Make sure we can import opym from local projects
 sys.path.append(str(Path.home() / "projects" / "opym_local" / "src"))
-from opym.petakit import submit_pipeline_job
+from opym.petakit import submit_pipeline_batch_job
 from opym.consolidate import consolidate_to_ome_zarr
 from opym.utils import orient_zyx_for_dsr
+
+# Max (timepoint, channel) frames bundled into one pipeline_batch ticket.
+# Frames are grouped by PSF (laser/channel) first, then batched across
+# consecutive timepoints up to this size -- see the performance plan's
+# Phase 2. Deliberately a named, tunable constant: expected to be retuned
+# after real production wall-clock measurements.
+MAX_BATCH_SIZE = 8
 
 def auto_detect_rois(z_array, master_roi_path=None):
     print("\n🔍 Auto-detecting ROIs from T=0...")
@@ -205,24 +212,44 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
     """
     import tifffile, zarr, time, numpy as np
     from pathlib import Path
-    from opym.petakit import submit_pipeline_job
+    from opym.petakit import submit_pipeline_batch_job
     from opym.utils import orient_zyx_for_dsr
-    
+
     # Note: tifffile memory-maps by default when possible. The boundary delays
     # are due to GPFS file open/close token overhead when crossing 4GB splits.
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
-    
+
     print(f"[Worker {worker_id:02d}] Initialized. Processing T={t_start} to {t_end-1}")
-    
-    for t in range(t_start, t_end):
-        for c, is_top, laser_name, output_c in extraction_plan:
-            roi = top_roi if is_top else bot_roi
-            if not roi: continue
-            
+
+    # Group by (laser_name == PSF) first, then batch consecutive timepoints
+    # within each group up to MAX_BATCH_SIZE -- see the performance plan's
+    # Phase 2. Per-frame extract/orient/stage-write logic below is
+    # unchanged; only dispatch granularity (one ticket per MAX_BATCH_SIZE
+    # frames instead of one per frame) differs from before.
+    for c, is_top, laser_name, output_c in extraction_plan:
+        roi = top_roi if is_top else bot_roi
+        if not roi: continue
+
+        psf_path = psf_map.get(laser_name, None)
+        batch_items = []
+
+        def _flush_batch():
+            if not batch_items:
+                return
+            submit_pipeline_batch_job(
+                items=[{"shm_path": str(sp), "output_file": str(of)} for sp, of in batch_items],
+                psf_paths=[psf_path] if psf_path else None,
+                z_step_um=z_step_um, dz_psf=psf_dz_um if psf_path else None,
+                debug=debug,  # let the MATLAB-side default (25 iters for RLMethod='simple') apply
+                ticket_label=f"{base_name}_C{output_c}",
+            )
+            batch_items.clear()
+
+        for t in range(t_start, t_end):
             shm_path = Path(f"/dev/shm/opym_jobs/{base_name}_T{t:04d}_C{output_c}.zarr")
             st = time.time()
-            
+
             # BULK SINGLE-READ
             if z.ndim == 5:
                 if c_axis == 1: cropped = np.array(z[t, c, :, roi[0], roi[1]])
@@ -245,16 +272,14 @@ def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi,
             zarr.save_array(shm_path, oriented, chunks=oriented.shape)
 
             output_file = output_dir_base / shm_path.name
-            psf_path = psf_map.get(laser_name, None)
+            batch_items.append((shm_path, output_file))
 
-            submit_pipeline_job(
-                output_file=output_file, shm_path=shm_path,
-                psf_paths=[psf_path] if psf_path else None,
-                z_step_um=z_step_um, dz_psf=psf_dz_um if psf_path else None,
-                debug=debug,  # let the MATLAB-side default (25 iters for RLMethod='simple') apply
-            )
-            
-            print(f"[Worker {worker_id:02d}] T={t:03d} C={output_c} | Extract: {extract_time:.2f}s")
+            print(f"[Worker {worker_id:02d}] T={t:03d} C={output_c} | Extract: {extract_time:.2f}s (staged for batch)")
+
+            if len(batch_items) >= MAX_BATCH_SIZE:
+                _flush_batch()
+
+        _flush_batch()  # tail flush for whatever's left under MAX_BATCH_SIZE
 
 
 
