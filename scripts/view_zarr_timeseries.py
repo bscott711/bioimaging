@@ -44,8 +44,11 @@ def main():
             store = zarr.open(str(z_path), mode='r')
             # Handle standard Zarr vs OME-Zarr structure
             arr = store['0'] if '0' in store else store
-            lazy_arrays.append(da.from_zarr(arr))
-            
+            # Per-frame zarrs are staged (X, Y, Z) — PetaKit5D's [ny, nx, nz]
+            # convention (see orient_zyx_for_dsr in opym.utils), preserved
+            # through Decon→DSR. Transpose to (Z, Y, X) for display here.
+            lazy_arrays.append(da.from_zarr(arr).transpose(2, 1, 0))
+
         # Stack all timepoints into a 4D array (T, Z, Y, X)
         stacked = da.stack(lazy_arrays, axis=0)
         print(f"   Channel {c} Stacked Shape: {stacked.shape}")
