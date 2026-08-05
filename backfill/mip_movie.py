@@ -1,6 +1,6 @@
 """Encodes the per-timepoint Z-MIP TIFFs PetaKit5D writes (once `save_mip`
-is enabled, see opym's run_petakit_server.m) into browsable MP4 movies for
-the Argus dashboard's MIP browser.
+is enabled, see opym's run_petakit_server.m) into browsable WebM/VP9 movies
+for the Argus dashboard's MIP browser.
 
 No movie-encoding code existed anywhere in these repos before this --
 `bioimaging/scripts/export_mip_tif.py` is the closest precedent (globs a
@@ -21,15 +21,18 @@ import tifffile
 
 _MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
 
-# Without this, ffmpeg writes the `moov` atom (the container's format/seek
-# index -- what a browser needs before it can even recognize the file as
-# playable video) after all the frame data instead of before it. A local
-# player that reads the whole file is fine either way, but the dashboard
-# serves these over HTTP with Range support for <video> scrubbing, and a
-# browser's initial (partial) fetch never reaches a trailing moov atom --
-# it just rejects the file outright ("no supported format"). This single
-# flag moves moov to the front of the file.
-_FASTSTART_PARAMS = ["-movflags", "+faststart"]
+# WebM/VP9, not MP4/H.264: Argus's Firefox (RHEL9) reports "H264 NONE" in
+# about:support -- RHEL doesn't ship a patent-licensed H.264 decoder Firefox
+# can use for <video> playback (the system's OpenH264 package is usable by
+# Firefox for WebRTC only, per Cisco's distribution license, not for regular
+# video). Confirmed with a real H.264/mp4 file that decoded fine via ffmpeg,
+# GStreamer, and headless Chromium, yet still failed in actual Firefox with
+# NS_ERROR_DOM_MEDIA_METADATA_ERR -- re-muxing and re-encoding at baseline
+# profile didn't help either, so it isn't a container/profile quirk, it's
+# categorical codec absence. VP9 shows "SW" (built-in software decode, no
+# system dependency) in the same about:support output, so it's the portable
+# choice -- not just a fix for this one machine.
+_VP9_PARAMS = ["-deadline", "realtime", "-cpu-used", "8", "-crf", "32", "-b:v", "0"]
 
 # Fixed per-channel pseudo-colors for the additive composite view (RGB,
 # 0-1 floats) -- cyan/magenta/yellow/red covers the 4-channel-per-excitation
@@ -83,8 +86,8 @@ def normalize_for_video(
 def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 12.0) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     iio.imwrite(
-        out_path, stack_u8, fps=fps, codec="libx264", pixelformat="yuv420p",
-        output_params=_FASTSTART_PARAMS,
+        out_path, stack_u8, fps=fps, codec="libvpx-vp9", pixelformat="yuv420p",
+        output_params=_VP9_PARAMS,
     )
     return out_path
 
@@ -109,8 +112,8 @@ def encode_composite_movie(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     iio.imwrite(
-        out_path, composite_u8, fps=fps, codec="libx264", pixelformat="yuv420p",
-        output_params=_FASTSTART_PARAMS,
+        out_path, composite_u8, fps=fps, codec="libvpx-vp9", pixelformat="yuv420p",
+        output_params=_VP9_PARAMS,
     )
     return out_path
 
@@ -136,7 +139,7 @@ def build_mip_movies_for_dataset(
     nested under `DSR_nodecon/MIPs/`) so the registry and the dashboard can
     find every dataset's movies via one predictable glob regardless of
     internal crop-stage layout. Each movie gets a same-named `.jpg` poster
-    (`<name>.mp4` -> `<name>.jpg`) for the dashboard's thumbnail grid.
+    (`<name>.webm` -> `<name>.jpg`) for the dashboard's thumbnail grid.
     """
     mips_dir = dsr_dir / "MIPs"
     by_channel = find_mip_files(mips_dir)
@@ -149,12 +152,12 @@ def build_mip_movies_for_dataset(
         stack = load_channel_stack(files)
         stack_u8 = normalize_for_video(stack)
         normalized_stacks[c] = stack_u8
-        out_path = out_dir / f"{sanitized_name}_C{c}.mp4"
+        out_path = out_dir / f"{sanitized_name}_C{c}.webm"
         written.append(encode_channel_movie(stack_u8, out_path, fps=fps))
         written.append(encode_poster_image(stack_u8[0], out_path.with_suffix(".jpg")))
 
     if len(normalized_stacks) > 1:
-        composite_path = out_dir / f"{sanitized_name}_composite.mp4"
+        composite_path = out_dir / f"{sanitized_name}_composite.webm"
         written.append(encode_composite_movie(normalized_stacks, composite_path, fps=fps))
         # Recompute frame 0 of the composite blend for its poster (cheap --
         # one frame -- rather than threading it back out of
