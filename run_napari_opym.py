@@ -16,6 +16,7 @@ from opym.petakit import (
     submit_pipeline_job,
     wait_for_job,
 )
+from opym.roi_detect import auto_detect_rois, compute_reference_projection
 
 
 def _get_z_step_um(path: Path) -> float | None:
@@ -103,142 +104,57 @@ def _trim_tiff_files(output_dir: Path):
 
 def _auto_detect_rois(image_layer, needs_top=True, needs_bot=True) -> list[np.ndarray]:
     """Auto-detects the biological sample ROI from the top and bottom halves.
-    Persists max_h and max_w to master_roi.json so future images match exactly.
+
+    Thin napari-specific adapter around the canonical
+    `opym.roi_detect.auto_detect_rois` (shared with the CLI and the bulk
+    backfill driver) -- this function's only remaining job is pulling a T=0
+    plane out of a napari image layer and converting the returned
+    (slice, slice) ROI pairs into the 4-corner coordinate arrays napari's
+    Shapes layer expects.
     """
-    import scipy.ndimage
-    import skimage.measure
-    import json
-    from pathlib import Path
-    
     print(f"\n🔍 Auto-detecting ROIs from data (Needs Top: {needs_top}, Needs Bot: {needs_bot})...")
-    
+
     master_roi_path = None
     if image_layer.source and image_layer.source.path:
         master_roi_path = Path(image_layer.source.path).parent / "master_roi.json"
-        
-    master_h, master_w = 200, 200
-    if master_roi_path and master_roi_path.exists():
-        try:
-            with open(master_roi_path, 'r') as f:
-                d = json.load(f)
-                master_h = d.get("max_h", 200)
-                master_w = d.get("max_w", 200)
-            print(f"   📂 Loaded previous bounds from master_roi.json (H: {master_h}, W: {master_w})")
-        except: pass
-        
-    # Get T=0 data. For lazy dask arrays, .compute() pulls just that timepoint
-    t0_data = image_layer.data[0] if hasattr(image_layer.data, "compute") else image_layer.data[0]
+
+    # Get T=0 data. For lazy dask/zarr arrays, .compute() pulls just that timepoint.
+    t0_data = image_layer.data[0]
     if hasattr(t0_data, "compute"):
         print("   (Fetching T=0 chunk from Zarr...)")
         t0_data = t0_data.compute()
-        
-    print("   Projecting over Z and Channels...")
-    # Max project over Z (axis 0) and Channels (axis 1) if dimensions match TZCYX
-    if t0_data.ndim >= 3:
-        # Assuming (Z, C, Y, X) or (Z, Y, X)
-        proj_axes = tuple(range(t0_data.ndim - 2))
-        max_proj = np.max(t0_data, axis=proj_axes)
-    else:
-        max_proj = t0_data
-        
-    max_y, max_x = max_proj.shape
-    half_y = max_y // 2
-    
-    def _find_half_roi(image_half, offset_y=0):
-        smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=5)
-        thresh = np.mean(smoothed) + 2 * np.std(smoothed)
-        mask = smoothed > thresh
-        
-        labels = skimage.measure.label(mask)
-        props = skimage.measure.regionprops(labels)
-        
-        if not props:
-            return None
-            
-        min_row, min_col, max_row, max_col = image_half.shape[0], image_half.shape[1], 0, 0
-        found = False
-        
-        for p in props:
-            if p.area > 500: # Ignore tiny hot pixel clusters
-                r0, c0, r1, c1 = p.bbox
-                min_row = min(min_row, r0)
-                min_col = min(min_col, c0)
-                max_row = max(max_row, r1)
-                max_col = max(max_col, c1)
-                found = True
-                
-        if not found:
-            return None
-            
-        # We don't add massive padding here, we just return the tight bounding box of the signal.
-        # The unifying step will expand this to the full optical FOV.
-        return {
-            "ymin": min_row + offset_y,
-            "ymax": max_row + offset_y,
-            "xmin": min_col,
-            "xmax": max_col
-        }
 
-    top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0) if needs_top else None
-    bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y) if needs_bot else None
-    
-    # Unify bounding box sizes so Top and Bottom have the exact same dimensions.
-    # We take the center of the detected signal, and expand it to capture the full optical FOV.
-    valid_rois = [r for r in [top_roi_dict, bot_roi_dict] if r is not None]
+    print("   Projecting over Z and Channels...")
+    max_proj = compute_reference_projection(np.asarray(t0_data), timepoint=None)
+
+    top_roi, bot_roi = auto_detect_rois(
+        max_proj,
+        master_roi_path=master_roi_path,
+        gaussian_sigma=5.0,
+        needs_top=needs_top,
+        needs_bot=needs_bot,
+    )
+
     shapes = []
-    
-    if valid_rois:
-        detected_max_h = max(r["ymax"] - r["ymin"] for r in valid_rois)
-        detected_max_w = max(r["xmax"] - r["xmin"] for r in valid_rois)
-        
-        # The full illuminated optical FOV. 
-        # Using 576x1152 (18x32 blocks of 64) for mathematically optimal CUDA/FFT performance!
-        EXPECTED_H = 576
-        EXPECTED_W = 1152
-        
-        # Enforce that our box is AT LEAST the expected optical FOV size
-        max_h = max(detected_max_h, EXPECTED_H)
-        max_w = max(detected_max_w, EXPECTED_W)
-        
-        if master_roi_path:
-            try:
-                with open(master_roi_path, 'w') as f:
-                    json.dump({"max_h": max_h, "max_w": max_w}, f)
-            except Exception as e:
-                print(f"⚠️ Could not save master_roi.json: {e}")
-                
-        for r_dict in [top_roi_dict, bot_roi_dict]:
-            if r_dict is None:
-                continue
-                
-            # Find the center of the detected signal
-            y_center = (r_dict["ymin"] + r_dict["ymax"]) // 2
-            x_center = (r_dict["xmin"] + r_dict["xmax"]) // 2
-            
-            # Expand outwards from the center to capture the full optical FOV
-            new_ymin = max(0, y_center - max_h // 2)
-            new_ymax = new_ymin + max_h
-            
-            new_xmin = max(0, x_center - max_w // 2)
-            new_xmax = min(max_x, new_xmin + max_w)
-            
-            # If expanding pushed us past the right edge, shift back left
-            if new_xmax > max_x:
-                new_xmax = max_x
-                new_xmin = max(0, new_xmax - max_w)
-                
-            print(f"   Optical FOV ROI: Y[{new_ymin}:{new_ymax}], X[{new_xmin}:{new_xmax}]")
-            coords = np.array([
-                [new_ymin, new_xmin],
-                [new_ymin, new_xmax],
-                [new_ymax, new_xmax],
-                [new_ymax, new_xmin],
-            ])
-            shapes.append(coords)
-            
+    for roi in (top_roi, bot_roi):
+        if roi is None:
+            continue
+        y_slice, x_slice = roi
+        print(f"   Optical FOV ROI: Y[{y_slice.start}:{y_slice.stop}], X[{x_slice.start}:{x_slice.stop}]")
+        shapes.append(
+            np.array(
+                [
+                    [y_slice.start, x_slice.start],
+                    [y_slice.start, x_slice.stop],
+                    [y_slice.stop, x_slice.stop],
+                    [y_slice.stop, x_slice.start],
+                ]
+            )
+        )
+
     if not shapes:
         print("❌ Could not detect any valid structures above background noise!")
-        
+
     return shapes
 
 _global_z = None
