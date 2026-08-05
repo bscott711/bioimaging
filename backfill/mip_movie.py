@@ -80,7 +80,7 @@ def normalize_for_video(
     return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
 
 
-def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 8.0) -> Path:
+def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 12.0) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     iio.imwrite(
         out_path, stack_u8, fps=fps, codec="libx264", pixelformat="yuv420p",
@@ -90,7 +90,7 @@ def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 8.0)
 
 
 def encode_composite_movie(
-    channel_stacks: dict[int, np.ndarray], out_path: Path, fps: float = 8.0
+    channel_stacks: dict[int, np.ndarray], out_path: Path, fps: float = 12.0
 ) -> Path:
     """Additively blends per-channel-normalized uint8 stacks into a single
     pseudo-colored RGB movie -- the default triage view."""
@@ -129,7 +129,7 @@ def encode_poster_image(frame_u8: np.ndarray, out_path: Path) -> Path:
 
 
 def build_mip_movies_for_dataset(
-    dsr_dir: Path, sanitized_name: str, out_dir: Path, fps: float = 8.0
+    dsr_dir: Path, sanitized_name: str, out_dir: Path, fps: float = 12.0
 ) -> list[Path]:
     """Orchestrates the above for one dataset. Writes to
     `<leaf_dir>/mip_movies/` -- a flat, crop-format-agnostic location (NOT

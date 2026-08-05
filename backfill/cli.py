@@ -121,7 +121,7 @@ def run_backfill(
     dry_run: bool = False,
     discover_only: bool = False,
     poll_interval_s: float = 30.0,
-    mip_fps: float = 8.0,
+    mip_fps: float = 12.0,
 ) -> None:
     """`dry_run`: discovery + print only, zero registry writes -- a fully
     read-only preview. `discover_only`: real discovery + registers every

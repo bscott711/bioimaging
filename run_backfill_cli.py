@@ -68,7 +68,7 @@ def main():
     parser.add_argument(
         "--mip-fps",
         type=float,
-        default=8.0,
+        default=12.0,
         help="Frame rate for encoded MIP movies.",
     )
     args = parser.parse_args()
