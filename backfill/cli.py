@@ -24,7 +24,13 @@ from opym.registry import StatusRegistry
 from opym.utils import sanitize_filename
 
 from backfill.mip_movie import build_mip_movies_for_dataset
-from backfill.pipeline import process_crop_and_submit
+from backfill.pipeline import detect_rois, process_crop_and_submit
+
+# Crop-queue submission order, lowest first -- 'ok' (real signal detected)
+# and 'unknown' (triage itself failed; don't penalize for that) go first,
+# 'dud' (no detectable signal in either camera half) goes last so GPU/CPU
+# time is spent on likely-good data before likely-empty data.
+_SIGNAL_PRIORITY = {"ok": 0, "unknown": 1, "dud": 2}
 
 DEFAULT_REGISTRY_PATH = Path(
     os.environ.get(
@@ -56,6 +62,28 @@ def _ticket_resolved(ticket_path: Path) -> tuple[bool, bool]:
     done = (base_dir / "completed" / ticket_path.name).exists()
     failed = (base_dir / "failed" / ticket_path.name).exists()
     return done, failed
+
+
+def _triage_worker(ds: LeafDataset, registry_path: Path) -> tuple[str, str]:
+    """Runs in its own process (same reason as `_crop_worker`): a cheap
+    upfront signal-presence + frame-count check (one lazy plane read, no
+    crop) used purely to order the crop queue -- see `run_backfill`'s Phase
+    0. Never lets a triage failure abort the batch; an unclassifiable
+    dataset is just deprioritized as 'unknown' rather than 'dud' (so a
+    transient read error doesn't get treated the same as confirmed-empty
+    data), and still gets a real triage attempt again inside Phase A's
+    `process_crop_and_submit` (`detect_rois` is cheap and idempotent).
+    """
+    registry = StatusRegistry(registry_path)
+    try:
+        try:
+            _top, _bot, signal_flag = detect_rois(ds, registry)
+        except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
+            print(f"[backfill] {ds.dataset_key}: triage failed: {e}")
+            signal_flag = "unknown"
+        return ds.dataset_key, signal_flag
+    finally:
+        registry.close()
 
 
 def _crop_worker(
@@ -166,6 +194,21 @@ def run_backfill(
     num_workers = workers or max(1, min(8, mp.cpu_count() // 2))
     dataset_by_key = {ds.dataset_key: ds for ds in datasets}
     pending: dict[str, Path] = {}
+
+    print(f"[backfill] Phase 0: triaging {len(datasets)} dataset(s) (signal check + frame count + preview)...")
+    signal_flags: dict[str, str] = {}
+    with ProcessPoolExecutor(max_workers=num_workers) as pool:
+        futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in datasets}
+        for future in as_completed(futures):
+            dataset_key, flag = future.result()
+            signal_flags[dataset_key] = flag
+
+    dud_count = sum(1 for f in signal_flags.values() if f == "dud")
+    print(
+        f"[backfill] Triage complete. {dud_count} likely-dud dataset(s) "
+        "deprioritized to the end of the crop queue (still processed, just last)."
+    )
+    datasets.sort(key=lambda ds: _SIGNAL_PRIORITY.get(signal_flags.get(ds.dataset_key, "unknown"), 1))
 
     print(f"[backfill] Phase A+B: cropping ({num_workers} workers) and polling deskew/MIP as tickets resolve...")
     with ProcessPoolExecutor(max_workers=num_workers) as pool:
