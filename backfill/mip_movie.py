@@ -21,6 +21,16 @@ import tifffile
 
 _MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
 
+# Without this, ffmpeg writes the `moov` atom (the container's format/seek
+# index -- what a browser needs before it can even recognize the file as
+# playable video) after all the frame data instead of before it. A local
+# player that reads the whole file is fine either way, but the dashboard
+# serves these over HTTP with Range support for <video> scrubbing, and a
+# browser's initial (partial) fetch never reaches a trailing moov atom --
+# it just rejects the file outright ("no supported format"). This single
+# flag moves moov to the front of the file.
+_FASTSTART_PARAMS = ["-movflags", "+faststart"]
+
 # Fixed per-channel pseudo-colors for the additive composite view (RGB,
 # 0-1 floats) -- cyan/magenta/yellow/red covers the 4-channel-per-excitation
 # output map (see core.py: 0=Bot-C0, 1=Top-C0, 2=Top-C1, 3=Bot-C1) with
@@ -72,7 +82,10 @@ def normalize_for_video(
 
 def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 8.0) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(out_path, stack_u8, fps=fps, codec="libx264", pixelformat="yuv420p")
+    iio.imwrite(
+        out_path, stack_u8, fps=fps, codec="libx264", pixelformat="yuv420p",
+        output_params=_FASTSTART_PARAMS,
+    )
     return out_path
 
 
@@ -95,7 +108,23 @@ def encode_composite_movie(
     composite_u8 = (composite_u8 * 255.0).astype(np.uint8)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(out_path, composite_u8, fps=fps, codec="libx264", pixelformat="yuv420p")
+    iio.imwrite(
+        out_path, composite_u8, fps=fps, codec="libx264", pixelformat="yuv420p",
+        output_params=_FASTSTART_PARAMS,
+    )
+    return out_path
+
+
+def encode_poster_image(frame_u8: np.ndarray, out_path: Path) -> Path:
+    """A static first-frame JPEG alongside each movie. `<video>` shows a
+    black box until it has enough data to paint a frame -- true even with
+    faststart, and doubly true if a browser has throttled/deferred autoplay
+    (which it will, once a page has hundreds of thumbnails). An explicit
+    `poster=` is the standard fix: something meaningful renders immediately,
+    independent of whether/when the video itself starts playing.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_path, frame_u8, extension=".jpg")
     return out_path
 
 
@@ -106,7 +135,8 @@ def build_mip_movies_for_dataset(
     `<leaf_dir>/mip_movies/` -- a flat, crop-format-agnostic location (NOT
     nested under `DSR_nodecon/MIPs/`) so the registry and the dashboard can
     find every dataset's movies via one predictable glob regardless of
-    internal crop-stage layout.
+    internal crop-stage layout. Each movie gets a same-named `.jpg` poster
+    (`<name>.mp4` -> `<name>.jpg`) for the dashboard's thumbnail grid.
     """
     mips_dir = dsr_dir / "MIPs"
     by_channel = find_mip_files(mips_dir)
@@ -121,9 +151,19 @@ def build_mip_movies_for_dataset(
         normalized_stacks[c] = stack_u8
         out_path = out_dir / f"{sanitized_name}_C{c}.mp4"
         written.append(encode_channel_movie(stack_u8, out_path, fps=fps))
+        written.append(encode_poster_image(stack_u8[0], out_path.with_suffix(".jpg")))
 
     if len(normalized_stacks) > 1:
         composite_path = out_dir / f"{sanitized_name}_composite.mp4"
         written.append(encode_composite_movie(normalized_stacks, composite_path, fps=fps))
+        # Recompute frame 0 of the composite blend for its poster (cheap --
+        # one frame -- rather than threading it back out of
+        # encode_composite_movie's internals).
+        first_frame = np.zeros((*normalized_stacks[next(iter(normalized_stacks))].shape[1:], 3), dtype=np.float32)
+        for i, c in enumerate(sorted(normalized_stacks)):
+            color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+            first_frame += (normalized_stacks[c][0].astype(np.float32) / 255.0)[..., None] * color
+        first_frame_u8 = (np.clip(first_frame, 0, 1.0) * 255.0).astype(np.uint8)
+        written.append(encode_poster_image(first_frame_u8, composite_path.with_suffix(".jpg")))
 
     return written
