@@ -11,13 +11,15 @@ missing `_metadata.txt`) must not abort the rest.
 
 from __future__ import annotations
 
+import json
+import traceback
 from pathlib import Path
 
 import tifffile
 import zarr
 from opym.core import run_processing_job
 from opym.discovery import LeafDataset
-from opym.metadata import parse_expected_timepoints, parse_z_step
+from opym.metadata import parse_expected_timepoints, parse_z_step, parse_zarr_z_step
 from opym.petakit import submit_remote_deskew_job
 from opym.registry import StatusRegistry
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
@@ -90,6 +92,35 @@ def _write_triage_preview(max_proj, out_path: Path) -> None:
         print(f"[backfill] triage preview failed for {out_path.parent.parent.name}: {e}")
 
 
+def _classify_unreadable_raw_file(exc: Exception) -> str | None:
+    """Returns `'corrupt'` iff `exc` indicates the raw file itself is
+    fundamentally unreadable (truncated/corrupted acquisition, or corrupted
+    TIFF metadata inside `tifffile`'s own parser), else `None` -- leaves the
+    existing generic `failed` path untouched. Conservative by design: a
+    false positive here would mislabel a real, fixable pipeline bug as
+    unrecoverable data loss, so this only fires on confirmed signatures:
+
+    - `tifffile.TiffFileError` ("not a TIFF file ...") -- the file's header
+      isn't a valid TIFF magic number at all (confirmed via a real
+      all-zero-header stub file from a crashed Micro-Manager acquisition).
+    - a bare `IndexError` raised from WITHIN `tifffile`'s own source (its
+      Micro-Manager multi-file series parser reads `databytecounts[0]` on
+      what should be a per-page byte-offset tuple; a corrupted IFD tag
+      makes that tuple empty) -- checked via the traceback's own frames so
+      an unrelated `IndexError` bug in OUR code is never mislabeled as
+      corrupt raw data.
+    """
+    if isinstance(exc, tifffile.TiffFileError):
+        return "corrupt"
+    if isinstance(exc, IndexError):
+        if any(
+            "tifffile" in (frame.filename or "")
+            for frame in traceback.extract_tb(exc.__traceback__)
+        ):
+            return "corrupt"
+    return None
+
+
 def detect_rois(
     ds: LeafDataset, registry: StatusRegistry
 ) -> tuple[tuple | None, tuple | None, str]:
@@ -140,6 +171,9 @@ def detect_rois(
         registry.finish_stage(ds.dataset_key, "roi_detect", status="done")
         return top_roi, bot_roi, signal_flag
     except Exception as e:  # noqa: BLE001 - reported into the registry, then re-raised
+        classification = _classify_unreadable_raw_file(e)
+        if classification is not None:
+            registry.set_triage(ds.dataset_key, signal_flag=classification)
         registry.finish_stage(ds.dataset_key, "roi_detect", status="failed", error=str(e))
         raise
 
@@ -253,6 +287,174 @@ def submit_deskew_ticket(
     )
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
     return ticket_path
+
+
+def _read_ome_zarr_dataset_path(store: Path, default: str = "p0") -> str:
+    """Reads the OME-NGFF dataset path (e.g. "p0", "0") out of a zarr
+    store's own `.zattrs` multiscales metadata, rather than assuming one
+    fixed name -- different OME-Zarr writers use different level-0 path
+    conventions.
+    """
+    try:
+        attrs = json.loads((store / ".zattrs").read_text())
+        return attrs["multiscales"][0]["datasets"][0]["path"]
+    except Exception:  # noqa: BLE001 - malformed/unexpected attrs, fall back
+        return default
+
+
+def _zarr_store_is_ready(store: Path) -> bool:
+    """True iff `store`'s OME-NGFF metadata AND its main pixel-data array
+    are actually present -- confirmed via a real in-flight Globus transfer
+    that a store's `.zgroup` (already required by
+    `opym.discovery.is_zarr_leaf_dataset_dir`) and a SUBSET of its arrays
+    (e.g. the `p`/`x`/`y`/`z` per-axis coordinate arrays this acquisition
+    writer also stores) can land well before `.zattrs` and the main pixel
+    array (`p0`) do -- `.zgroup` alone is not proof the store is complete.
+    A store caught mid-transfer is simply not ready yet, not corrupt --
+    the caller should skip it for this run and let the next run pick it up
+    once Globus finishes, not record a hard failure.
+    """
+    if not (store / ".zattrs").is_file():
+        return False
+    dataset_path = _read_ome_zarr_dataset_path(store)
+    return (store / dataset_path).is_dir()
+
+
+def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: Path) -> Path:
+    """Bridges two real, independent compatibility gaps confirmed directly
+    against PetaKit5D's source and against live failed tickets -- two of its
+    own utilities disagree with each other about what a zarr GROUP path
+    should contain, and neither has any awareness of the OME-NGFF standard
+    (`multiscales`/`p0`) this acquisition software's zarr writer uses:
+
+    1. `ZarrAdapter.m` (used by `blockedImage`, e.g. `XR_parseImageFilenames`)
+       only recognizes ITS OWN multi-resolution pyramid naming (`L_1_1_1` for
+       the full-resolution level, written by its own
+       `XR_multiresZarrGeneration.m`) -- fails with "Unable to open <path>"
+       otherwise.
+    2. `getImageSize.m` -- called later, on the same path -- takes a
+       completely different shortcut: since the path string ends in "zarr",
+       it unconditionally tries to `fopen`+`fread` a `.zarray` file directly
+       inside the given path (i.e. treats it as a flat array store, no group
+       nesting at all), regardless of whether a `.zgroup` is also present.
+       Fails with "Invalid file identifier" (silent `fopen` failure) when
+       that assumption doesn't hold (confirmed via a real failed ticket).
+
+    Both are satisfied simultaneously with one mirror: `.zgroup` and
+    `.zarray` can coexist as plain files/symlinks in the same directory with
+    no OS-level conflict, and `ZarrAdapter.openToRead` checks for `.zgroup`
+    first, so `.zarray`'s presence doesn't change which branch it takes.
+    (The actual pixel-reading path, `readzarr.m`, tries its own compiled
+    zarr reader first but falls back to this same group-aware `ZarrAdapter`
+    on any exception, so no third convention needs bridging there.)
+
+    A tiny, read-only, symlink-only mirror per dataset -- no pixel data is
+    copied, and the real synced acquisition data is never touched (a hard
+    constraint for this pipeline) -- every link lives under `mirror_dir`, in
+    this pipeline's own per-dataset output namespace.
+    """
+    def _relink(link_path: Path, target: Path) -> None:
+        """`Path.exists()` follows symlinks and reports False for a
+        DANGLING one (e.g. built while the store was still mid-Globus-
+        transfer, before its real target existed) -- so a plain
+        `if not link_path.exists()` guard would try to recreate an already-
+        present dangling link and crash with FileExistsError (confirmed via
+        a real run against a store still mid-transfer). Check `is_symlink()`
+        instead, which reports the link's own presence regardless of target
+        validity, and always repoint it to `target` so a mirror built
+        against incomplete data self-heals once the real data lands.
+        """
+        if link_path.is_symlink() or link_path.exists():
+            if link_path.resolve() == target:
+                return
+            link_path.unlink()
+        link_path.symlink_to(target)
+
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+    for store in channel_zarr_paths:
+        if not _zarr_store_is_ready(store):
+            raise FileNotFoundError(
+                f"{store} is missing .zattrs or its main pixel-data array -- "
+                "likely still mid-Globus-transfer, will retry on next run"
+            )
+        mirrored_store = mirror_dir / store.name
+        mirrored_store.mkdir(exist_ok=True)
+        dataset_path = _read_ome_zarr_dataset_path(store)
+
+        _relink(mirrored_store / "L_1_1_1", (store / dataset_path).resolve())
+        _relink(mirrored_store / ".zgroup", (store / ".zgroup").resolve())
+        _relink(mirrored_store / ".zarray", (store / dataset_path / ".zarray").resolve())
+    return mirror_dir
+
+
+def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
+    """`submit_deskew_ticket`'s counterpart for `KIND_ZARR_PRECROPPED`
+    datasets: no crop stage exists for these (already cropped/channel-split
+    at capture time), so this dispatches directly against a symlink mirror
+    of the raw per-channel zarr stores (see `build_zarr_pyramid_mirror`).
+
+    `channel_patterns` are the exact member filenames (e.g.
+    `["bead_005_GFP_488.ome.zarr", "bead_005_mScarlet_561.ome.zarr"]`), not
+    a bare shared prefix -- PetaKit5D's channel matching is substring
+    `contains()`-based, and a bare prefix like "cell" would also match an
+    unrelated sibling dataset's file ("cell_001_mScarlet_561.ome.zarr"). A
+    full filename can't accidentally match a different file's name that
+    way, so this is the only safe pattern given the confirmed real
+    file-naming convention (see `opym.discovery.parse_zarr_group_prefix`).
+
+    `input_target` is the mirror directory (this dataset's own output
+    namespace, not the raw dir) so `submit_remote_deskew_job`'s TIFF-
+    redirection logic (which only triggers when `input_target.is_file()`)
+    is a no-op here, and PetaKit5D writes its DSR_nodecon output as a
+    sibling of the mirror -- i.e. still fully within `ds.leaf_dir`, never
+    colliding with a sibling dataset sharing the same raw directory.
+    """
+    if registry.is_stage_done(ds.dataset_key, "deskew"):
+        return None
+
+    existing = registry.get_stage(ds.dataset_key, "deskew")
+    if existing and existing["status"] == "running" and existing["ticket_path"]:
+        return Path(existing["ticket_path"])
+
+    mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
+    z_step_um = parse_zarr_z_step(mda_settings_file, default_z_step=0.3)
+    channel_patterns = [p.name for p in ds.channel_zarr_paths]
+    mirror_dir = build_zarr_pyramid_mirror(ds.channel_zarr_paths, ds.leaf_dir / "zarr_mirror")
+
+    ticket_path = submit_remote_deskew_job(
+        input_target=mirror_dir,
+        z_step_um=z_step_um,
+        deskew=True,
+        rotate=True,
+        psf_path=None,
+        dsr_dir_name="DSR_nodecon",
+        channel_patterns=channel_patterns,
+        save_mip=True,
+        zarr_input=True,
+    )
+    registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
+    return ticket_path
+
+
+def process_zarr_precropped_dataset(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
+    """Phase A worker entry point for `KIND_ZARR_PRECROPPED` datasets --
+    `process_crop_and_submit`'s counterpart, minus the crop stage (already
+    done at capture time). Registers the dataset and submits the deskew
+    ticket directly; returns the ticket path for Phase B to poll, same
+    contract as `process_crop_and_submit`.
+    """
+    registry.register_dataset(
+        ds.dataset_key,
+        root=str(ds.root),
+        leaf_dir=str(ds.leaf_dir),
+        master_file=str(ds.master_file),
+        has_legacy_decon=False,
+    )
+    try:
+        return submit_zarr_deskew_ticket(ds, registry)
+    except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
+        print(f"[backfill] {ds.dataset_key}: {e}")
+        return None
 
 
 def process_crop_and_submit(

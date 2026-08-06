@@ -19,17 +19,19 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from opym.discovery import LeafDataset, discover_leaf_datasets
+from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.registry import StatusRegistry
 from opym.utils import sanitize_filename
 
-from backfill.mip_movie import build_mip_movies_for_dataset
-from backfill.pipeline import detect_rois, process_crop_and_submit
+from backfill.mip_movie import build_mip_movies_for_dataset, build_poster_for_zarr_dataset
+from backfill.pipeline import detect_rois, process_crop_and_submit, process_zarr_precropped_dataset
 
 # Crop-queue submission order, lowest first -- 'ok' (real signal detected)
-# and 'unknown' (triage itself failed; don't penalize for that) go first,
-# 'dud' (no detectable signal in either camera half) goes last so GPU/CPU
-# time is spent on likely-good data before likely-empty data.
+# and 'unknown' (triage itself failed, or this is a KIND_ZARR_PRECROPPED
+# dataset that skips triage entirely -- see run_backfill's Phase 0; don't
+# penalize either case) go first, 'dud' (no detectable signal in either
+# camera half) goes last so GPU/CPU time is spent on likely-good data
+# before likely-empty data.
 _SIGNAL_PRIORITY = {"ok": 0, "unknown": 1, "dud": 2}
 
 DEFAULT_REGISTRY_PATH = Path(
@@ -93,10 +95,17 @@ def _crop_worker(
     each worker opens its own `StatusRegistry(registry_path)` rather than
     sharing one across the pool (same rule as "no shared file handles
     across process boundaries" elsewhere in this codebase).
+
+    Dispatches by `ds.kind`: `KIND_ZARR_PRECROPPED` datasets are already
+    cropped/channel-split at capture time, so they skip straight to ticket
+    submission with no crop stage at all.
     """
     registry = StatusRegistry(registry_path)
     try:
-        ticket_path = process_crop_and_submit(ds, registry, has_legacy_decon=legacy_decon)
+        if ds.kind == KIND_ZARR_PRECROPPED:
+            ticket_path = process_zarr_precropped_dataset(ds, registry)
+        else:
+            ticket_path = process_crop_and_submit(ds, registry, has_legacy_decon=legacy_decon)
         return ds.dataset_key, (str(ticket_path) if ticket_path else None)
     finally:
         registry.close()
@@ -127,14 +136,30 @@ def _drain_resolved_tickets(
             )
             continue
 
-        dsr_dir = ds.leaf_dir / "processed_tiff_series_split" / "DSR_nodecon"
+        # KIND_ZARR_PRECROPPED has no crop stage, so PetaKit5D writes
+        # DSR_nodecon as a sibling of dataDir -- which was ds.leaf_dir's own
+        # zarr_mirror (see build_zarr_pyramid_mirror), not an intermediate
+        # TIFF_SERIES crop-output dir, so it lands directly in ds.leaf_dir
+        # (this dataset's own output namespace, never shared with a sibling
+        # dataset from the same raw directory).
+        if ds.kind == KIND_ZARR_PRECROPPED:
+            dsr_dir = ds.leaf_dir / "DSR_nodecon"
+        else:
+            dsr_dir = ds.leaf_dir / "processed_tiff_series_split" / "DSR_nodecon"
         registry.finish_stage(dataset_key, "deskew", status="done", output_path=str(dsr_dir))
 
         registry.start_stage(dataset_key, "mip_encode")
         try:
             movies_dir = ds.leaf_dir / "mip_movies"
-            sanitized_name = sanitize_filename(ds.master_file.name)
-            build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
+            if ds.kind == KIND_ZARR_PRECROPPED:
+                # Every real example of this format seen so far is a
+                # single timepoint -- a static poster, not a movie (see
+                # build_poster_for_zarr_dataset's docstring).
+                channel_fsnames = [p.name.removesuffix(".ome.zarr") for p in ds.channel_zarr_paths]
+                build_poster_for_zarr_dataset(dsr_dir, channel_fsnames, movies_dir)
+            else:
+                sanitized_name = sanitize_filename(ds.master_file.name)
+                build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
             registry.finish_stage(dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
         except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
             registry.finish_stage(dataset_key, "mip_encode", status="failed", error=str(e))
@@ -195,10 +220,19 @@ def run_backfill(
     dataset_by_key = {ds.dataset_key: ds for ds in datasets}
     pending: dict[str, Path] = {}
 
-    print(f"[backfill] Phase 0: triaging {len(datasets)} dataset(s) (signal check + frame count + preview)...")
+    # KIND_ZARR_PRECROPPED datasets skip triage entirely: detect_rois
+    # assumes a raw OME-TIF's dual-camera frame shape, which doesn't apply
+    # to already-cropped, already-channel-split zarr input. They default to
+    # 'unknown' priority (see _SIGNAL_PRIORITY) -- same as a failed triage,
+    # not penalized like a confirmed dud.
+    triage_candidates = [ds for ds in datasets if ds.kind != KIND_ZARR_PRECROPPED]
+    print(
+        f"[backfill] Phase 0: triaging {len(triage_candidates)} dataset(s) "
+        "(signal check + frame count + preview)..."
+    )
     signal_flags: dict[str, str] = {}
     with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in datasets}
+        futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
         for future in as_completed(futures):
             dataset_key, flag = future.result()
             signal_flags[dataset_key] = flag

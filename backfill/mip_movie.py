@@ -131,6 +131,55 @@ def encode_poster_image(frame_u8: np.ndarray, out_path: Path) -> Path:
     return out_path
 
 
+def build_poster_for_zarr_dataset(
+    dsr_dir: Path, channel_fsnames: list[str], out_dir: Path
+) -> Path:
+    """Poster-only counterpart to `build_mip_movies_for_dataset`, for
+    pre-cropped zarr-input datasets (`opym.discovery.KIND_ZARR_PRECROPPED`).
+
+    Every real example of this acquisition format seen so far is a single
+    timepoint (no `time_plan` in its `MDA_settings.yaml`) -- PetaKit5D names
+    its MIP output `<fsname>_MIP_z.tif` with no `_C{c}_T{t}` suffix at all
+    (that suffix is specific to this pipeline's own TIFF_SERIES splitting,
+    not a PetaKit5D convention), confirming there's really one frame per
+    channel here, not a T-stack to encode as a movie. A one-frame "movie" is
+    a degenerate, confusing case anyway (see the MP4/WebM playback
+    debugging earlier this session) -- a static poster is the honest
+    representation.
+
+    Writes a single `triage_preview.jpg` (blended across channels if more
+    than one) directly into `out_dir` -- deliberately the SAME filename the
+    dashboard already falls back to for a not-yet-fully-processed dataset
+    (see `opym-dashboard`'s `_annotate_row`/`mip_detail`), so a finished
+    zarr-input dataset needs zero dashboard-side special-casing: it's still
+    "one representative static image," just for a different reason.
+    """
+    mips_dir = dsr_dir / "MIPs"
+    frames_u8: dict[str, np.ndarray] = {}
+    for fsname in channel_fsnames:
+        mip_path = mips_dir / f"{fsname}_MIP_z.tif"
+        if not mip_path.is_file():
+            continue
+        frame = tifffile.imread(mip_path)
+        frames_u8[fsname] = normalize_for_video(frame)
+
+    if not frames_u8:
+        raise FileNotFoundError(
+            f"No MIP TIFFs found under {mips_dir} for channels {channel_fsnames}"
+        )
+
+    out_path = out_dir / "triage_preview.jpg"
+    if len(frames_u8) == 1:
+        return encode_poster_image(next(iter(frames_u8.values())), out_path)
+
+    blended = np.zeros((*next(iter(frames_u8.values())).shape, 3), dtype=np.float32)
+    for i, frame_u8 in enumerate(frames_u8.values()):
+        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        blended += (frame_u8.astype(np.float32) / 255.0)[..., None] * color
+    blended_u8 = (np.clip(blended, 0, 1.0) * 255.0).astype(np.uint8)
+    return encode_poster_image(blended_u8, out_path)
+
+
 def build_mip_movies_for_dataset(
     dsr_dir: Path, sanitized_name: str, out_dir: Path, fps: float = 12.0
 ) -> list[Path]:
