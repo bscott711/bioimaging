@@ -6,12 +6,25 @@ from pathlib import Path
 # Known fluorophore patterns and their standardized names
 FLUOROPHORES = {
     r'mng|ng|gfp|calcein': 'GFP/mNG (488)',
-    r'msca|msc|scarlet|568|tdtomato|tdtom': 'mScarlet/CF568/TdTomato (561)',
+    # `msca`/`msc`/`scarlet` alone miss bare "Sca"/"Sc" tokens (e.g.
+    # "..._Sca_memNG", no leading "m") that real dataset folders use --
+    # the `(?:^|[_-])sca?(?:[_-]|$)` alternative catches those as their own
+    # underscore/hyphen-delimited token without turning into an unbounded
+    # substring match that would false-positive on words like "tetraspeck"
+    # or "escape" that merely contain "sc"/"sca".
+    r'msca|msc|scarlet|568|tdtomato|tdtom|(?:^|[_-])sca?(?:[_-]|$)': 'mScarlet/CF568/TdTomato (561)',
     r'cf647|647|sir': 'CF647/SiR (640)',
     r'hoechst|dapi|violet': 'Hoechst/Violet (405)',
     r'beads|yg': 'YG Beads (488 nm excitation)',
     r'cav': 'Calcein Violet (cav) [Excited by 405nm]',
-    r'flm': 'Fetal Liver Macrophage (flm)'
+    r'flm': 'Fetal Liver Macrophage (flm)',
+    # FYVE is a PI3P-binding probe domain fused to an existing FP (e.g.
+    # "mSc2xFYVE"), not its own excitation line -- deliberately has no
+    # wavelength number so it contributes to Detected_Channels for
+    # reporting without affecting extraction_plan's has_488/has_561/etc
+    # wavelength checks (same reasoning as excluding `flm` from channel
+    # count, see tests/test_logic.py).
+    r'2xfyve|fyve': 'FYVE domain (PI3P probe, fused to GFP/mScarlet -- not a separate channel)',
 }
 
 def parse_name_for_fluorophores(name):
