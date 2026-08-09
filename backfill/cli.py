@@ -20,6 +20,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
+from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
 from opym.utils import sanitize_filename
 
@@ -145,7 +146,14 @@ def _drain_resolved_tickets(
         if ds.kind == KIND_ZARR_PRECROPPED:
             dsr_dir = ds.leaf_dir / "DSR_nodecon"
         else:
-            dsr_dir = ds.leaf_dir / "processed_tiff_series_split" / "DSR_nodecon"
+            # Must resolve the same way `submit_remote_deskew_job` resolved
+            # its `dataDir` when the ticket was submitted (prefers the
+            # master-stem-named crop dir over the legacy
+            # `processed_tiff_series_split/` one) -- hardcoding the legacy
+            # path here caused every dataset that actually used the newer
+            # convention to report "No MIP TIFFs found" even though PetaKit5D
+            # had already written complete output to the other directory.
+            dsr_dir = resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon"
         registry.finish_stage(dataset_key, "deskew", status="done", output_path=str(dsr_dir))
 
         registry.start_stage(dataset_key, "mip_encode")

@@ -12,6 +12,7 @@ missing `_metadata.txt`) must not abort the rest.
 from __future__ import annotations
 
 import json
+import shutil
 import traceback
 from pathlib import Path
 
@@ -20,7 +21,7 @@ import zarr
 from opym.core import run_processing_job
 from opym.discovery import LeafDataset
 from opym.metadata import parse_expected_timepoints, parse_z_step, parse_zarr_z_step
-from opym.petakit import submit_remote_deskew_job
+from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.registry import StatusRegistry
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import OutputFormat, derive_paths, scan_channel_patterns
@@ -47,6 +48,21 @@ def _output_looks_present(path: Path) -> bool:
 def _open_lazy_zarr(master_file: Path) -> zarr.Array:
     store = tifffile.imread(str(master_file), aszarr=True)
     return zarr.open(store, mode="r")
+
+
+def _clean_stale_deskew_output(dsr_dir: Path) -> None:
+    """A retried deskew ticket resubmits against the same `dsr_dir` a prior
+    failed attempt already wrote into -- confirmed via a real failed job
+    log where PetaKit5D's `save('-v7.3', [dsrPath, '/parameters.mat'], pr)`
+    failed with "Unable to write to file ... because it appears to be
+    corrupt" against a half-written `parameters.mat` left behind by that
+    earlier crash. Every subsequent retry hits the exact same corrupt-file
+    error regardless of whether the underlying cause was fixed, since
+    nothing ever clears the half-written state. Removing `dsr_dir` before
+    resubmitting gives each retry a genuinely clean attempt.
+    """
+    if dsr_dir.exists():
+        shutil.rmtree(dsr_dir)
 
 
 def _channels_to_output(extraction_plan: list[tuple[int, bool, str, int]]) -> list[int] | None:
@@ -269,6 +285,11 @@ def submit_deskew_ticket(
     existing = registry.get_stage(ds.dataset_key, "deskew")
     if existing and existing["status"] == "running" and existing["ticket_path"]:
         return Path(existing["ticket_path"])
+    if existing and existing["status"] == "failed":
+        try:
+            _clean_stale_deskew_output(resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon")
+        except FileNotFoundError:
+            pass
 
     paths = derive_paths(ds.master_file, OutputFormat.ZARR)  # only used for its metadata_file path
     z_step_um = parse_z_step(paths.metadata_file, default_z_step=0.3)
@@ -415,6 +436,8 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     existing = registry.get_stage(ds.dataset_key, "deskew")
     if existing and existing["status"] == "running" and existing["ticket_path"]:
         return Path(existing["ticket_path"])
+    if existing and existing["status"] == "failed":
+        _clean_stale_deskew_output(ds.leaf_dir / "DSR_nodecon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     z_step_um = parse_zarr_z_step(mda_settings_file, default_z_step=0.3)
