@@ -112,6 +112,46 @@ def _crop_worker(
         registry.close()
 
 
+def _dsr_dir_for(ds: LeafDataset) -> Path:
+    """Where PetaKit5D actually wrote (or will write) `DSR_nodecon/` for
+    this dataset. KIND_ZARR_PRECROPPED has no crop stage, so PetaKit5D
+    writes DSR_nodecon as a sibling of dataDir -- which was ds.leaf_dir's
+    own zarr_mirror (see build_zarr_pyramid_mirror), not an intermediate
+    TIFF_SERIES crop-output dir, so it lands directly in ds.leaf_dir (this
+    dataset's own output namespace, never shared with a sibling dataset
+    from the same raw directory). Everything else must resolve the same way
+    `submit_remote_deskew_job` resolved its `dataDir` when the ticket was
+    submitted (prefers the master-stem-named crop dir over the legacy
+    `processed_tiff_series_split/` one) -- hardcoding the legacy path here
+    caused every dataset that actually used the newer convention to report
+    "No MIP TIFFs found" even though PetaKit5D had already written complete
+    output to the other directory.
+    """
+    if ds.kind == KIND_ZARR_PRECROPPED:
+        return ds.leaf_dir / "DSR_nodecon"
+    return resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon"
+
+
+def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -> None:
+    dsr_dir = _dsr_dir_for(ds)
+    registry.start_stage(ds.dataset_key, "mip_encode")
+    try:
+        movies_dir = ds.leaf_dir / "mip_movies"
+        if ds.kind == KIND_ZARR_PRECROPPED:
+            # Every real example of this format seen so far is a
+            # single timepoint -- a static poster, not a movie (see
+            # build_poster_for_zarr_dataset's docstring).
+            channel_fsnames = [p.name.removesuffix(".ome.zarr") for p in ds.channel_zarr_paths]
+            build_poster_for_zarr_dataset(dsr_dir, channel_fsnames, movies_dir)
+        else:
+            sanitized_name = sanitize_filename(ds.master_file.name)
+            build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
+        registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
+    except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
+        registry.finish_stage(ds.dataset_key, "mip_encode", status="failed", error=str(e))
+        print(f"[backfill] {ds.dataset_key}: mip_encode failed: {e}")
+
+
 def _drain_resolved_tickets(
     pending: dict[str, Path],
     dataset_by_key: dict[str, LeafDataset],
@@ -137,41 +177,8 @@ def _drain_resolved_tickets(
             )
             continue
 
-        # KIND_ZARR_PRECROPPED has no crop stage, so PetaKit5D writes
-        # DSR_nodecon as a sibling of dataDir -- which was ds.leaf_dir's own
-        # zarr_mirror (see build_zarr_pyramid_mirror), not an intermediate
-        # TIFF_SERIES crop-output dir, so it lands directly in ds.leaf_dir
-        # (this dataset's own output namespace, never shared with a sibling
-        # dataset from the same raw directory).
-        if ds.kind == KIND_ZARR_PRECROPPED:
-            dsr_dir = ds.leaf_dir / "DSR_nodecon"
-        else:
-            # Must resolve the same way `submit_remote_deskew_job` resolved
-            # its `dataDir` when the ticket was submitted (prefers the
-            # master-stem-named crop dir over the legacy
-            # `processed_tiff_series_split/` one) -- hardcoding the legacy
-            # path here caused every dataset that actually used the newer
-            # convention to report "No MIP TIFFs found" even though PetaKit5D
-            # had already written complete output to the other directory.
-            dsr_dir = resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon"
-        registry.finish_stage(dataset_key, "deskew", status="done", output_path=str(dsr_dir))
-
-        registry.start_stage(dataset_key, "mip_encode")
-        try:
-            movies_dir = ds.leaf_dir / "mip_movies"
-            if ds.kind == KIND_ZARR_PRECROPPED:
-                # Every real example of this format seen so far is a
-                # single timepoint -- a static poster, not a movie (see
-                # build_poster_for_zarr_dataset's docstring).
-                channel_fsnames = [p.name.removesuffix(".ome.zarr") for p in ds.channel_zarr_paths]
-                build_poster_for_zarr_dataset(dsr_dir, channel_fsnames, movies_dir)
-            else:
-                sanitized_name = sanitize_filename(ds.master_file.name)
-                build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
-            registry.finish_stage(dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
-        except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
-            registry.finish_stage(dataset_key, "mip_encode", status="failed", error=str(e))
-            print(f"[backfill] {dataset_key}: mip_encode failed: {e}")
+        registry.finish_stage(dataset_key, "deskew", status="done", output_path=str(_dsr_dir_for(ds)))
+        _run_mip_encode(ds, registry, mip_fps)
 
 
 def run_backfill(
@@ -262,6 +269,18 @@ def run_backfill(
             dataset_key, ticket_path_str = future.result()
             if ticket_path_str:
                 pending[dataset_key] = Path(ticket_path_str)
+            elif registry.is_stage_done(dataset_key, "deskew") and not registry.is_stage_done(
+                dataset_key, "mip_encode"
+            ):
+                # submit_deskew_ticket/submit_zarr_deskew_ticket return None
+                # with no ticket to poll whenever deskew is already 'done' --
+                # that's the common "already fully done" case, but it's also
+                # exactly what happens when only mip_encode failed on a prior
+                # run (e.g. the DSR_nodecon lookup bug _dsr_dir_for fixes):
+                # deskew stays 'done' forever and nothing else ever retries
+                # mip_encode alone. Catch that case here instead of silently
+                # leaving it failed on every subsequent run.
+                _run_mip_encode(dataset_by_key[dataset_key], registry, mip_fps)
             _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
     print(f"[backfill] Phase A complete. {len(pending)} dataset(s) still awaiting deskew resolution.")
