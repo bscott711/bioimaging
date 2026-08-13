@@ -101,10 +101,18 @@ Key paths at runtime:
 opym <data_dir>            # CLI pipeline (run_pipeline_cli.py → opym.petakit)
 naparym                    # Napari GUI (run_napari_opym.py)
 opym-serve                 # GPU watchdog (opym.local_gpu_worker)
+opym-receive               # Real-time frame-streaming receiver (opym.stream.receiver)
 
 uv run pytest tests/       # Run test suite
 just dcv                   # Create DCV remote desktop session
 ```
+
+`opym-receive` is a second, independent ingress into the same
+`/dev/shm/petakit_jobs` ticket queue `opym-serve` already watches — it
+listens for frames pushed live from the acquisition workstation instead of
+discovering finished files on GPFS, and stages/tickets each one exactly like
+the batch path does. See `opym_local/docs/STREAMING_PROTOCOL.md` for the
+wire protocol.
 
 ---
 
