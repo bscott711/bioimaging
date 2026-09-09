@@ -426,8 +426,10 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     `input_target` is the mirror directory (this dataset's own output
     namespace, not the raw dir) so `submit_remote_deskew_job`'s TIFF-
     redirection logic (which only triggers when `input_target.is_file()`)
-    is a no-op here, and PetaKit5D writes its DSR_nodecon output as a
-    sibling of the mirror -- i.e. still fully within `ds.leaf_dir`, never
+    is a no-op here, and PetaKit5D writes its DSR_nodecon output *inside*
+    the mirror (`ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"`, confirmed
+    against a real completed job -- not a sibling of it, see `_dsr_dir_for`
+    in `backfill/cli.py`) -- i.e. still fully within `ds.leaf_dir`, never
     colliding with a sibling dataset sharing the same raw directory.
     """
     if registry.is_stage_done(ds.dataset_key, "deskew"):
@@ -437,7 +439,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     if existing and existing["status"] == "running" and existing["ticket_path"]:
         return Path(existing["ticket_path"])
     if existing and existing["status"] == "failed":
-        _clean_stale_deskew_output(ds.leaf_dir / "DSR_nodecon")
+        _clean_stale_deskew_output(ds.leaf_dir / "zarr_mirror" / "DSR_nodecon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     z_step_um = parse_zarr_z_step(mda_settings_file, default_z_step=0.3)

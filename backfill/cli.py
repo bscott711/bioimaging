@@ -114,21 +114,24 @@ def _crop_worker(
 
 def _dsr_dir_for(ds: LeafDataset) -> Path:
     """Where PetaKit5D actually wrote (or will write) `DSR_nodecon/` for
-    this dataset. KIND_ZARR_PRECROPPED has no crop stage, so PetaKit5D
-    writes DSR_nodecon as a sibling of dataDir -- which was ds.leaf_dir's
-    own zarr_mirror (see build_zarr_pyramid_mirror), not an intermediate
-    TIFF_SERIES crop-output dir, so it lands directly in ds.leaf_dir (this
-    dataset's own output namespace, never shared with a sibling dataset
-    from the same raw directory). Everything else must resolve the same way
-    `submit_remote_deskew_job` resolved its `dataDir` when the ticket was
-    submitted (prefers the master-stem-named crop dir over the legacy
-    `processed_tiff_series_split/` one) -- hardcoding the legacy path here
-    caused every dataset that actually used the newer convention to report
-    "No MIP TIFFs found" even though PetaKit5D had already written complete
-    output to the other directory.
+    this dataset. KIND_ZARR_PRECROPPED has no crop stage, so the ticket's
+    `dataDir` is `ds.leaf_dir / "zarr_mirror"` (see
+    `submit_zarr_deskew_ticket`'s `mirror_dir` / `build_zarr_pyramid_mirror`)
+    -- confirmed against a real completed job that PetaKit5D writes
+    `DSR_nodecon` *inside* that `dataDir`, not as its sibling: the previous
+    `ds.leaf_dir / "DSR_nodecon"` (one level too shallow) caused every real
+    zarr-precropped dataset to report "No MIP TIFFs found" even though
+    PetaKit5D had already written complete output one directory deeper, at
+    `ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"`. Everything else must
+    resolve the same way `submit_remote_deskew_job` resolved its `dataDir`
+    when the ticket was submitted (prefers the master-stem-named crop dir
+    over the legacy `processed_tiff_series_split/` one) -- hardcoding the
+    legacy path here caused every dataset that actually used the newer
+    convention to report the same "No MIP TIFFs found" symptom even though
+    PetaKit5D had already written complete output to the other directory.
     """
     if ds.kind == KIND_ZARR_PRECROPPED:
-        return ds.leaf_dir / "DSR_nodecon"
+        return ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"
     return resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon"
 
 
@@ -140,8 +143,13 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
         if ds.kind == KIND_ZARR_PRECROPPED:
             # Every real example of this format seen so far is a
             # single timepoint -- a static poster, not a movie (see
-            # build_poster_for_zarr_dataset's docstring).
-            channel_fsnames = [p.name.removesuffix(".ome.zarr") for p in ds.channel_zarr_paths]
+            # build_poster_for_zarr_dataset's docstring). PetaKit5D's real
+            # MIP output keeps the ".ome" component (confirmed against a
+            # real completed job: "cell_003_GFP_488.ome_MIP_z.tif", not
+            # "cell_003_GFP_488_MIP_z.tif") -- strip only ".zarr", not
+            # ".ome.zarr", or every real dataset fails to match its own
+            # MIP file.
+            channel_fsnames = [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
             build_poster_for_zarr_dataset(dsr_dir, channel_fsnames, movies_dir)
         else:
             sanitized_name = sanitize_filename(ds.master_file.name)
@@ -291,3 +299,47 @@ def run_backfill(
 
     registry.close()
     print("[backfill] Done.")
+
+
+def watch_backfill(
+    roots: list[Path],
+    *,
+    registry_path: Path = DEFAULT_REGISTRY_PATH,
+    workers: int | None = None,
+    dry_run: bool = False,
+    discover_only: bool = False,
+    poll_interval_s: float = 30.0,
+    mip_fps: float = 12.0,
+    watch_interval_s: float = 120.0,
+) -> None:
+    """Runs `run_backfill` forever, re-discovering and re-processing every
+    `watch_interval_s` seconds -- this is what makes new uploads under the
+    data roots show up in the dashboard without a human remembering to
+    invoke the one-shot CLI. Safe to loop tightly: every stage is
+    registry-gated (see `process_crop_and_submit`/`_ticket_resolved`/etc.),
+    so a dataset that's already `done` costs one registry lookup per pass,
+    not reprocessing.
+
+    One pass's exception doesn't end the service -- caught, logged, and the
+    loop sleeps and retries, same resilience philosophy as
+    `opym.local_gpu_worker`'s watchdog (a crashed pass shouldn't take the
+    whole unattended service down with it).
+    """
+    print(f"[backfill] Watch mode: re-scanning every {watch_interval_s:.0f}s. Ctrl-C to stop.")
+    while True:
+        start = time.monotonic()
+        try:
+            run_backfill(
+                roots,
+                registry_path=registry_path,
+                workers=workers,
+                dry_run=dry_run,
+                discover_only=discover_only,
+                poll_interval_s=poll_interval_s,
+                mip_fps=mip_fps,
+            )
+        except Exception as e:  # noqa: BLE001 - one bad pass must not kill the service
+            print(f"[backfill] watch pass failed: {e!r}")
+        elapsed = time.monotonic() - start
+        print(f"[backfill] Pass took {elapsed:.1f}s. Sleeping {watch_interval_s:.0f}s until next scan.")
+        time.sleep(watch_interval_s)
