@@ -342,10 +342,11 @@ def _zarr_store_is_ready(store: Path) -> bool:
 
 
 def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: Path) -> Path:
-    """Bridges two real, independent compatibility gaps confirmed directly
-    against PetaKit5D's source and against live failed tickets -- two of its
-    own utilities disagree with each other about what a zarr GROUP path
-    should contain, and neither has any awareness of the OME-NGFF standard
+    """Bridges THREE real, independent compatibility gaps confirmed directly
+    against PetaKit5D's source (both the .m files and the compiled
+    parallelReadZarr mex's C++ source) and against live tickets -- its own
+    utilities disagree with each other about what a zarr GROUP path should
+    contain, and none of them has any awareness of the OME-NGFF standard
     (`multiscales`/`p0`) this acquisition software's zarr writer uses:
 
     1. `ZarrAdapter.m` (used by `blockedImage`, e.g. `XR_parseImageFilenames`)
@@ -360,14 +361,36 @@ def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: 
        nesting at all), regardless of whether a `.zgroup` is also present.
        Fails with "Invalid file identifier" (silent `fopen` failure) when
        that assumption doesn't hold (confirmed via a real failed ticket).
+    3. **The actual pixel read.** `readzarr.m` tries the compiled
+       `parallelReadZarr` mex FIRST, only falling back to the group-aware
+       `ZarrAdapter` (gap 1's fix) on an exception. `parallelReadZarr`
+       constructs each chunk's file path directly as
+       `<given path>/<chunk-index-subfolder>/.../<chunk file>` -- it never
+       looks inside `L_1_1_1`. Confirmed in
+       `cpp-zarr/src/parallelreadzarr.cpp`: when a chunk file can't be
+       opened, it silently `continue`s past it (line ~103) rather than
+       raising -- by design, so a legitimately sparse zarr array reads as
+       zero for its missing chunks, per zarr's own fill_value semantics.
+       Before this fix, `mirror_dir/<store>` only had `L_1_1_1` (a directory
+       symlink one level away from where the real chunks needed to be), so
+       EVERY chunk lookup silently missed and returned zero -- no exception
+       was ever raised, so `readzarr.m`'s `ZarrAdapter` fallback (which
+       *would* have found the data via `L_1_1_1`) never even ran. This is
+       why every KIND_ZARR_PRECROPPED dataset processed so far came out as
+       an all-zero DSR_nodecon volume with no error anywhere in the
+       pipeline (confirmed against 5 real datasets: real signal in the raw
+       zarr, 100%-zero output, ruled out the DSR-path and MIP-filename bugs
+       as the cause since output existed and matched expected shape -- just
+       every pixel was 0).
 
-    Both are satisfied simultaneously with one mirror: `.zgroup` and
+    All three are satisfied simultaneously with one mirror: `.zgroup` and
     `.zarray` can coexist as plain files/symlinks in the same directory with
-    no OS-level conflict, and `ZarrAdapter.openToRead` checks for `.zgroup`
-    first, so `.zarray`'s presence doesn't change which branch it takes.
-    (The actual pixel-reading path, `readzarr.m`, tries its own compiled
-    zarr reader first but falls back to this same group-aware `ZarrAdapter`
-    on any exception, so no third convention needs bridging there.)
+    no OS-level conflict (gaps 1+2, `ZarrAdapter.openToRead` checks for
+    `.zgroup` first, so `.zarray`'s presence doesn't change which branch it
+    takes), and mirroring every real chunk-index subfolder directly into
+    `mirror_dir/<store>` (not just under `L_1_1_1`) satisfies gap 3 by making
+    the direct `parallelReadZarr` path find real chunk files exactly where
+    `.zarray` claims they are.
 
     A tiny, read-only, symlink-only mirror per dataset -- no pixel data is
     copied, and the real synced acquisition data is never touched (a hard
@@ -401,10 +424,18 @@ def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: 
         mirrored_store = mirror_dir / store.name
         mirrored_store.mkdir(exist_ok=True)
         dataset_path = _read_ome_zarr_dataset_path(store)
+        pixel_dir = store / dataset_path
 
-        _relink(mirrored_store / "L_1_1_1", (store / dataset_path).resolve())
+        _relink(mirrored_store / "L_1_1_1", pixel_dir.resolve())
         _relink(mirrored_store / ".zgroup", (store / ".zgroup").resolve())
-        _relink(mirrored_store / ".zarray", (store / dataset_path / ".zarray").resolve())
+        _relink(mirrored_store / ".zarray", (pixel_dir / ".zarray").resolve())
+        # Gap 3 (see docstring): mirror every real chunk-index subfolder
+        # directly into mirrored_store too, not just reachable via
+        # L_1_1_1 -- parallelReadZarr looks for chunks right here.
+        for entry in pixel_dir.iterdir():
+            if entry.name.startswith("."):
+                continue
+            _relink(mirrored_store / entry.name, entry.resolve())
     return mirror_dir
 
 
