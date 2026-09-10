@@ -1,0 +1,14 @@
+[Unit]
+Description=opym-backfill: continuous OPM backfill discovery (watch mode)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
+ExecStart=%h/.local/bin/uv run opym-backfill --watch 120
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

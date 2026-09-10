@@ -12,6 +12,7 @@ missing `_metadata.txt`) must not abort the rest.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import traceback
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 import tifffile
 import zarr
 from opym.core import run_processing_job
-from opym.discovery import LeafDataset
+from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, parse_zarr_z_step
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.registry import StatusRegistry
@@ -341,37 +342,72 @@ def _zarr_store_is_ready(store: Path) -> bool:
     return (store / dataset_path).is_dir()
 
 
-def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: Path) -> Path:
-    """Bridges two real, independent compatibility gaps confirmed directly
-    against PetaKit5D's source and against live failed tickets -- two of its
-    own utilities disagree with each other about what a zarr GROUP path
-    should contain, and neither has any awareness of the OME-NGFF standard
-    (`multiscales`/`p0`) this acquisition software's zarr writer uses:
+def _read_zarray(pixel_dir: Path) -> dict:
+    return json.loads((pixel_dir / ".zarray").read_text())
 
-    1. `ZarrAdapter.m` (used by `blockedImage`, e.g. `XR_parseImageFilenames`)
-       only recognizes ITS OWN multi-resolution pyramid naming (`L_1_1_1` for
-       the full-resolution level, written by its own
-       `XR_multiresZarrGeneration.m`) -- fails with "Unable to open <path>"
-       otherwise.
-    2. `getImageSize.m` -- called later, on the same path -- takes a
-       completely different shortcut: since the path string ends in "zarr",
-       it unconditionally tries to `fopen`+`fread` a `.zarray` file directly
-       inside the given path (i.e. treats it as a flat array store, no group
-       nesting at all), regardless of whether a `.zgroup` is also present.
-       Fails with "Invalid file identifier" (silent `fopen` failure) when
-       that assumption doesn't hold (confirmed via a real failed ticket).
 
-    Both are satisfied simultaneously with one mirror: `.zgroup` and
-    `.zarray` can coexist as plain files/symlinks in the same directory with
-    no OS-level conflict, and `ZarrAdapter.openToRead` checks for `.zgroup`
-    first, so `.zarray`'s presence doesn't change which branch it takes.
-    (The actual pixel-reading path, `readzarr.m`, tries its own compiled
-    zarr reader first but falls back to this same group-aware `ZarrAdapter`
-    on any exception, so no third convention needs bridging there.)
+def channel_store_timepoints(store: Path) -> int:
+    """Number of timepoints on a per-channel zarr store's pixel array: 1
+    for a 3D `(z, y, x)` store, `T` for a 4D `(t, z, y, x)` one (the newer
+    pymmcore MDA writer's live-imaging output -- e.g. every macropinocytosis
+    dataset). The `.zattrs` axes list would say the same thing, but the
+    `.zarray` shape is the ground truth PetaKit5D actually reads.
+    """
+    shape = _read_zarray(store / _read_ome_zarr_dataset_path(store))["shape"]
+    return int(shape[0]) if len(shape) >= 4 else 1
 
-    A tiny, read-only, symlink-only mirror per dataset -- no pixel data is
-    copied, and the real synced acquisition data is never touched (a hard
-    constraint for this pipeline) -- every link lives under `mirror_dir`, in
+
+def dataset_timepoints(ds: LeafDataset) -> int:
+    """Timepoint count for a KIND_ZARR_PRECROPPED dataset -- the max across
+    its channel stores (they should agree; `max` so a ragged/partial store
+    can't silently shorten the series)."""
+    return max(
+        (channel_store_timepoints(s) for s in ds.channel_zarr_paths),
+        default=1,
+    )
+
+
+def build_zarr_pyramid_mirror(
+    channel_zarr_paths: tuple[Path, ...],
+    mirror_dir: Path,
+    *,
+    dataset_prefix: str | None = None,
+    max_timepoints: int | None = None,
+) -> Path:
+    """Per-dataset symlink mirror that presents this acquisition's OME-NGFF
+    zarr stores to PetaKit5D as plain flat zarr v2 arrays -- the one shape
+    all three of its independent zarr readers actually handle:
+
+    - `parallelReadZarr` (the compiled mex `readzarr.m` tries FIRST): reads
+      `<dir>/.zarray` then opens each chunk at `<dir>/<chunk-subfolder>/.../
+      <chunk file>` directly. On a chunk file it can't open it silently
+      skips it (`cpp-zarr/src/parallelreadzarr.cpp` ~line 103) -- by design,
+      so a sparse array reads as its fill value -- and never raises, so
+      `readzarr.m`'s `ZarrAdapter` fallback never runs. A mirror that put
+      the real chunks anywhere but directly under `<dir>` therefore read as
+      **all zeros with no error** (the original blank-DSR bug).
+    - `ZarrAdapter.openToRead` (the fallback): `py.zarr.open(<dir>)` when
+      there's no `<dir>/.zgroup`. A flat `.zarray` array opens fine; a
+      `.zgroup` would send it looking for an `L_1_1_1/` pyramid level with
+      its own `.zarray`, which an OME store doesn't have (pixels live in
+      `p0/`, and a per-timepoint slice of `p0/` has no `.zarray` at all).
+    - `getImageSize.m`: `fopen`s `<dir>/.zarray` unconditionally.
+
+    So each mirrored store is exactly: a `.zarray` (symlinked from the real
+    `p0/.zarray`, or written when it's a 3D view of a 4D store) plus one
+    symlink per real chunk-index subfolder. No `.zgroup`, no `L_1_1_1`.
+
+    A 4D `(t, z, y, x)` time-series store is exploded into one 3D mirrored
+    store per timepoint (`<prefix>_C<ch>_T<ttt>.zarr`), because PetaKit5D's
+    deskew/rotate path (`XR_deskewRotateFrame` -> `deskewFrame3D` /
+    `rotateFrame3D`) is strictly 3D. Its multi-timepoint model, same as the
+    legacy TIFF-series path (`opym.core`'s `{name}_C{c}_T{t:03d}.tif`), is
+    "many 3D files discovered by `channelPatterns`", not "one 4D array".
+    `dataset_prefix` names those per-T stores (defaults to the shared
+    channel-name prefix); `max_timepoints` caps the count (cheap test runs).
+
+    Symlink-only, read-only: no pixel data is copied and the real synced
+    acquisition data is never touched -- every link lives under `mirror_dir`,
     this pipeline's own per-dataset output namespace.
     """
     def _relink(link_path: Path, target: Path) -> None:
@@ -391,20 +427,64 @@ def build_zarr_pyramid_mirror(channel_zarr_paths: tuple[Path, ...], mirror_dir: 
             link_path.unlink()
         link_path.symlink_to(target)
 
+    def _mirror_store_dir(dst: Path, chunk_src: Path, zarray: Path | str) -> None:
+        """One flat mirrored zarr array: `.zarray` (a Path to symlink, or a
+        JSON string to write for a 3D view of a 4D store) plus one symlink
+        per real chunk-index subfolder directly under `dst` -- where every
+        PetaKit5D zarr reader looks for chunks.
+        """
+        dst.mkdir(exist_ok=True)
+        za = dst / ".zarray"
+        if isinstance(zarray, Path):
+            _relink(za, zarray.resolve())
+        else:
+            if za.is_symlink():
+                za.unlink()
+            za.write_text(zarray)
+        keep = {".zarray"}
+        for entry in chunk_src.iterdir():
+            if entry.name.startswith("."):
+                continue
+            _relink(dst / entry.name, entry.resolve())
+            keep.add(entry.name)
+        # Drop stale links from a previous build -- an old `.zgroup`/
+        # `L_1_1_1` from the pre-flat-array layout, or chunk subfolders that
+        # no longer belong to this view -- so `parallelReadZarr` can't pick
+        # up a chunk that isn't part of the array `.zarray` describes.
+        for entry in dst.iterdir():
+            if entry.is_symlink() and entry.name not in keep:
+                entry.unlink()
+
     mirror_dir.mkdir(parents=True, exist_ok=True)
-    for store in channel_zarr_paths:
+    for cidx, store in enumerate(channel_zarr_paths):
         if not _zarr_store_is_ready(store):
             raise FileNotFoundError(
                 f"{store} is missing .zattrs or its main pixel-data array -- "
                 "likely still mid-Globus-transfer, will retry on next run"
             )
-        mirrored_store = mirror_dir / store.name
-        mirrored_store.mkdir(exist_ok=True)
-        dataset_path = _read_ome_zarr_dataset_path(store)
+        pixel_dir = store / _read_ome_zarr_dataset_path(store)
+        zarray = _read_zarray(pixel_dir)
+        shape = zarray["shape"]
 
-        _relink(mirrored_store / "L_1_1_1", (store / dataset_path).resolve())
-        _relink(mirrored_store / ".zgroup", (store / ".zgroup").resolve())
-        _relink(mirrored_store / ".zarray", (store / dataset_path / ".zarray").resolve())
+        if len(shape) < 4 or shape[0] == 1:
+            # 3D store (or a degenerate 4D with T=1): one mirrored store,
+            # `.zarray` symlinked straight through -- its shape already
+            # matches what PetaKit5D should read.
+            _mirror_store_dir(mirror_dir / store.name, pixel_dir, pixel_dir / ".zarray")
+            continue
+
+        # 4D time series -> one 3D mirrored store per timepoint. The 3D
+        # `.zarray` is the 4D one minus its leading (t) axis; chunk data for
+        # timepoint t lives under `pixel_dir/<t>/`.
+        n_t = shape[0] if max_timepoints is None else min(shape[0], max_timepoints)
+        zarray_3d = json.dumps({**zarray, "shape": shape[1:], "chunks": zarray["chunks"][1:]})
+        prefix = dataset_prefix or parse_zarr_group_prefix(store)
+        for t in range(n_t):
+            _mirror_store_dir(
+                mirror_dir / f"{prefix}_C{cidx}_T{t:03d}.zarr",
+                pixel_dir / str(t),
+                zarray_3d,
+            )
     return mirror_dir
 
 
@@ -414,20 +494,23 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     at capture time), so this dispatches directly against a symlink mirror
     of the raw per-channel zarr stores (see `build_zarr_pyramid_mirror`).
 
-    `channel_patterns` are the exact member filenames (e.g.
-    `["bead_005_GFP_488.ome.zarr", "bead_005_mScarlet_561.ome.zarr"]`), not
-    a bare shared prefix -- PetaKit5D's channel matching is substring
+    `channel_patterns` for a single-timepoint dataset are the exact member
+    filenames (e.g. `["bead_005_GFP_488.ome.zarr", ...]`), not a bare
+    shared prefix -- PetaKit5D's channel matching is substring
     `contains()`-based, and a bare prefix like "cell" would also match an
-    unrelated sibling dataset's file ("cell_001_mScarlet_561.ome.zarr"). A
-    full filename can't accidentally match a different file's name that
-    way, so this is the only safe pattern given the confirmed real
-    file-naming convention (see `opym.discovery.parse_zarr_group_prefix`).
+    unrelated sibling dataset's file. For a time series, the mirror is
+    exploded to `<prefix>_C<ch>_T<ttt>.zarr` per timepoint (see
+    `build_zarr_pyramid_mirror`), and the patterns become `_C0_T`, `_C1_T`,
+    ... -- unambiguous because the mirror directory is this dataset's own
+    private output namespace, never shared with a sibling dataset.
 
     `input_target` is the mirror directory (this dataset's own output
     namespace, not the raw dir) so `submit_remote_deskew_job`'s TIFF-
     redirection logic (which only triggers when `input_target.is_file()`)
-    is a no-op here, and PetaKit5D writes its DSR_nodecon output as a
-    sibling of the mirror -- i.e. still fully within `ds.leaf_dir`, never
+    is a no-op here, and PetaKit5D writes its DSR_nodecon output *inside*
+    the mirror (`ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"`, confirmed
+    against a real completed job -- not a sibling of it, see `_dsr_dir_for`
+    in `backfill/cli.py`) -- i.e. still fully within `ds.leaf_dir`, never
     colliding with a sibling dataset sharing the same raw directory.
     """
     if registry.is_stage_done(ds.dataset_key, "deskew"):
@@ -437,12 +520,26 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     if existing and existing["status"] == "running" and existing["ticket_path"]:
         return Path(existing["ticket_path"])
     if existing and existing["status"] == "failed":
-        _clean_stale_deskew_output(ds.leaf_dir / "DSR_nodecon")
+        _clean_stale_deskew_output(ds.leaf_dir / "zarr_mirror" / "DSR_nodecon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     z_step_um = parse_zarr_z_step(mda_settings_file, default_z_step=0.3)
-    channel_patterns = [p.name for p in ds.channel_zarr_paths]
-    mirror_dir = build_zarr_pyramid_mirror(ds.channel_zarr_paths, ds.leaf_dir / "zarr_mirror")
+
+    n_timepoints = dataset_timepoints(ds)
+    max_t = int(os.environ.get("OPYM_ZARR_MAX_TIMEPOINTS", "0")) or None
+    mirror_dir = build_zarr_pyramid_mirror(
+        ds.channel_zarr_paths,
+        ds.leaf_dir / "zarr_mirror",
+        dataset_prefix=ds.leaf_dir.name,
+        max_timepoints=max_t,
+    )
+    if n_timepoints > 1:
+        # Exploded per-timepoint mirror -> match every frame of a channel.
+        # Safe (not the usual full-filename pattern) because the mirror dir
+        # is this dataset's own private namespace, no sibling collision.
+        channel_patterns = [f"_C{i}_T" for i in range(len(ds.channel_zarr_paths))]
+    else:
+        channel_patterns = [p.name for p in ds.channel_zarr_paths]
 
     ticket_path = submit_remote_deskew_job(
         input_target=mirror_dir,

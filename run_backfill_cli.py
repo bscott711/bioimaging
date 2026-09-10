@@ -8,7 +8,7 @@ convention: business logic lives in backfill/, this just parses args.
 import argparse
 from pathlib import Path
 
-from backfill.cli import DEFAULT_REGISTRY_PATH, run_backfill
+from backfill.cli import DEFAULT_REGISTRY_PATH, run_backfill, watch_backfill
 
 DEFAULT_ROOTS = [
     Path("/mmfs1/scratch/jacks.local/microscopy"),
@@ -71,17 +71,40 @@ def main():
         default=12.0,
         help="Frame rate for encoded MIP movies.",
     )
+    parser.add_argument(
+        "--watch",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Run forever instead of once, re-scanning the data roots every SECONDS "
+            "so new uploads are picked up without a manual re-run. Intended for a "
+            "persistent service (see deploy/opym-backfill.service)."
+        ),
+    )
     args = parser.parse_args()
 
-    run_backfill(
-        roots=args.roots,
-        registry_path=args.registry_path,
-        workers=args.workers,
-        dry_run=args.dry_run,
-        discover_only=args.discover_only,
-        poll_interval_s=args.poll_interval,
-        mip_fps=args.mip_fps,
-    )
+    if args.watch is not None:
+        watch_backfill(
+            roots=args.roots,
+            registry_path=args.registry_path,
+            workers=args.workers,
+            dry_run=args.dry_run,
+            discover_only=args.discover_only,
+            poll_interval_s=args.poll_interval,
+            mip_fps=args.mip_fps,
+            watch_interval_s=args.watch,
+        )
+    else:
+        run_backfill(
+            roots=args.roots,
+            registry_path=args.registry_path,
+            workers=args.workers,
+            dry_run=args.dry_run,
+            discover_only=args.discover_only,
+            poll_interval_s=args.poll_interval,
+            mip_fps=args.mip_fps,
+        )
 
 
 if __name__ == "__main__":
