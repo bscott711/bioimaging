@@ -24,8 +24,17 @@ from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
 from opym.utils import sanitize_filename
 
-from backfill.mip_movie import build_mip_movies_for_dataset, build_poster_for_zarr_dataset
-from backfill.pipeline import detect_rois, process_crop_and_submit, process_zarr_precropped_dataset
+from backfill.mip_movie import (
+    build_mip_movies_for_dataset,
+    build_poster_for_zarr_dataset,
+    find_mip_files,
+)
+from backfill.pipeline import (
+    dataset_timepoints,
+    detect_rois,
+    process_crop_and_submit,
+    process_zarr_precropped_dataset,
+)
 
 # Crop-queue submission order, lowest first -- 'ok' (real signal detected)
 # and 'unknown' (triage itself failed, or this is a KIND_ZARR_PRECROPPED
@@ -140,9 +149,22 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
     registry.start_stage(ds.dataset_key, "mip_encode")
     try:
         movies_dir = ds.leaf_dir / "mip_movies"
-        if ds.kind == KIND_ZARR_PRECROPPED:
-            # Every real example of this format seen so far is a
-            # single timepoint -- a static poster, not a movie (see
+        if ds.kind == KIND_ZARR_PRECROPPED and dataset_timepoints(ds) > 1:
+            # Time series: the mirror was exploded to per-timepoint frames
+            # named `<prefix>_C<c>_T<ttt>.zarr` (see build_zarr_pyramid_mirror),
+            # so PetaKit5D's MIP output is a `_C{c}_T{t}_MIP_z.tif` series --
+            # exactly what the legacy movie builder consumes.
+            build_mip_movies_for_dataset(dsr_dir, ds.leaf_dir.name, movies_dir, fps=mip_fps)
+            by_channel = find_mip_files(dsr_dir / "MIPs")
+            actual_t = max((len(v) for v in by_channel.values()), default=0)
+            registry.set_triage(
+                ds.dataset_key,
+                signal_flag="ok",
+                expected_timepoints=dataset_timepoints(ds),
+                actual_timepoints=actual_t,
+            )
+        elif ds.kind == KIND_ZARR_PRECROPPED:
+            # Single timepoint -- a static poster, not a movie (see
             # build_poster_for_zarr_dataset's docstring). PetaKit5D's real
             # MIP output keeps the ".ome" component (confirmed against a
             # real completed job: "cell_003_GFP_488.ome_MIP_z.tif", not
