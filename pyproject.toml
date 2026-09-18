@@ -56,4 +56,5 @@ dev = [
 opym = "run_pipeline_cli:main"
 naparym = "run_napari_opym:main"
 opym-serve = "opym.local_gpu_worker:main"
+opym-receive = "opym.stream.receiver:main"
 opym-backfill = "run_backfill_cli:main"
