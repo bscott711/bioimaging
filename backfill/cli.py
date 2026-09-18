@@ -16,7 +16,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
@@ -211,6 +212,54 @@ def _drain_resolved_tickets(
         _run_mip_encode(ds, registry, mip_fps)
 
 
+def _as_completed_with_timeout(
+    pool: ProcessPoolExecutor,
+    futures: dict[Future, LeafDataset],
+    per_task_timeout_s: float,
+) -> Iterator[tuple[Future, LeafDataset]]:
+    """Like `concurrent.futures.as_completed(futures)`, except any future
+    still running `per_task_timeout_s` after submission is yielded anyway
+    (caller must check `future.done()`) instead of being waited on forever.
+
+    Confirmed live that a single pathological dataset (a full-stack
+    max-projection over a large single-timepoint calibration stack on a
+    slow NFS mount) can occupy a worker for 15+ minutes without ever
+    raising -- and `as_completed()` with no timeout, inside a `with
+    ProcessPoolExecutor(...):` block, blocks the *entire* pass on it,
+    starving every other dataset. Once every future is either done or
+    timed out, shuts the pool down without waiting for any
+    still-running (abandoned) worker -- it keeps running in the
+    background until it finishes on its own, but no longer blocks the
+    orchestrator.
+    """
+    deadlines = {f: time.monotonic() + per_task_timeout_s for f in futures}
+    pending = set(futures)
+    try:
+        while pending:
+            next_deadline = min(deadlines[f] for f in pending)
+            done, pending = wait(
+                pending, timeout=max(0.0, next_deadline - time.monotonic()), return_when=FIRST_COMPLETED
+            )
+            for f in done:
+                yield f, futures[f]
+            now = time.monotonic()
+            timed_out = {f for f in pending if deadlines[f] <= now}
+            pending -= timed_out
+            for f in timed_out:
+                yield f, futures[f]
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# How long a single dataset may occupy a worker before the orchestrator
+# stops waiting on it and moves on -- see `_as_completed_with_timeout`.
+# Triage (Phase 0) is meant to be a cheap signal-presence check, so a much
+# tighter bound than the real crop/convert work (Phase A) catches a
+# pathological dataset fast.
+_TRIAGE_TASK_TIMEOUT_S = 300.0
+_CROP_TASK_TIMEOUT_S = 1800.0
+
+
 def run_backfill(
     roots: list[Path],
     *,
@@ -270,16 +319,43 @@ def run_backfill(
     # to already-cropped, already-channel-split zarr input. They default to
     # 'unknown' priority (see _SIGNAL_PRIORITY) -- same as a failed triage,
     # not penalized like a confirmed dud.
-    triage_candidates = [ds for ds in datasets if ds.kind != KIND_ZARR_PRECROPPED]
+    #
+    # Datasets already fully done (mip_encode) are also skipped here --
+    # detect_rois() itself early-returns for them too (belt-and-suspenders
+    # for Phase A's redundant internal call), but filtering them out of the
+    # candidate list up front avoids spinning up a worker at all for the
+    # common case (most of the registry, on a steady-state watch pass).
+    triage_candidates = [
+        ds
+        for ds in datasets
+        if ds.kind != KIND_ZARR_PRECROPPED and not registry.is_stage_done(ds.dataset_key, "mip_encode")
+    ]
     print(
         f"[backfill] Phase 0: triaging {len(triage_candidates)} dataset(s) "
         "(signal check + frame count + preview)..."
     )
     signal_flags: dict[str, str] = {}
-    with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
-        for future in as_completed(futures):
+    pool = ProcessPoolExecutor(max_workers=num_workers)
+    futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
+    for future, ds in _as_completed_with_timeout(pool, futures, _TRIAGE_TASK_TIMEOUT_S):
+        if not future.done():
+            print(
+                f"[backfill] {ds.dataset_key}: triage timed out after "
+                f"{_TRIAGE_TASK_TIMEOUT_S:.0f}s, deprioritizing and moving on "
+                "(worker abandoned, may still be running in the background)"
+            )
+            registry.finish_stage(
+                ds.dataset_key, "roi_detect", status="failed",
+                error=f"triage timed out after {_TRIAGE_TASK_TIMEOUT_S:.0f}s",
+            )
+            signal_flags[ds.dataset_key] = "unknown"
+            continue
+        try:
             dataset_key, flag = future.result()
+        except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
+            print(f"[backfill] {ds.dataset_key}: triage worker crashed: {e!r}")
+            signal_flags[ds.dataset_key] = "unknown"
+        else:
             signal_flags[dataset_key] = flag
 
     dud_count = sum(1 for f in signal_flags.values() if f == "dud")
@@ -290,28 +366,41 @@ def run_backfill(
     datasets.sort(key=lambda ds: _SIGNAL_PRIORITY.get(signal_flags.get(ds.dataset_key, "unknown"), 1))
 
     print(f"[backfill] Phase A+B: cropping ({num_workers} workers) and polling deskew/MIP as tickets resolve...")
-    with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        futures = {
-            pool.submit(_crop_worker, ds, registry_path, legacy_flags[ds.dataset_key]): ds
-            for ds in datasets
-        }
-        for future in as_completed(futures):
-            dataset_key, ticket_path_str = future.result()
-            if ticket_path_str:
-                pending[dataset_key] = Path(ticket_path_str)
-            elif registry.is_stage_done(dataset_key, "deskew") and not registry.is_stage_done(
-                dataset_key, "mip_encode"
-            ):
-                # submit_deskew_ticket/submit_zarr_deskew_ticket return None
-                # with no ticket to poll whenever deskew is already 'done' --
-                # that's the common "already fully done" case, but it's also
-                # exactly what happens when only mip_encode failed on a prior
-                # run (e.g. the DSR_nodecon lookup bug _dsr_dir_for fixes):
-                # deskew stays 'done' forever and nothing else ever retries
-                # mip_encode alone. Catch that case here instead of silently
-                # leaving it failed on every subsequent run.
-                _run_mip_encode(dataset_by_key[dataset_key], registry, mip_fps)
+    pool = ProcessPoolExecutor(max_workers=num_workers)
+    futures = {
+        pool.submit(_crop_worker, ds, registry_path, legacy_flags[ds.dataset_key]): ds
+        for ds in datasets
+    }
+    for future, ds in _as_completed_with_timeout(pool, futures, _CROP_TASK_TIMEOUT_S):
+        if not future.done():
+            print(
+                f"[backfill] {ds.dataset_key}: crop/deskew-submit timed out after "
+                f"{_CROP_TASK_TIMEOUT_S:.0f}s, will retry next pass "
+                "(worker abandoned, may still be running in the background)"
+            )
             _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
+            continue
+        try:
+            dataset_key, ticket_path_str = future.result()
+        except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
+            print(f"[backfill] {ds.dataset_key}: crop worker crashed: {e!r}")
+            _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
+            continue
+        if ticket_path_str:
+            pending[dataset_key] = Path(ticket_path_str)
+        elif registry.is_stage_done(dataset_key, "deskew") and not registry.is_stage_done(
+            dataset_key, "mip_encode"
+        ):
+            # submit_deskew_ticket/submit_zarr_deskew_ticket return None
+            # with no ticket to poll whenever deskew is already 'done' --
+            # that's the common "already fully done" case, but it's also
+            # exactly what happens when only mip_encode failed on a prior
+            # run (e.g. the DSR_nodecon lookup bug _dsr_dir_for fixes):
+            # deskew stays 'done' forever and nothing else ever retries
+            # mip_encode alone. Catch that case here instead of silently
+            # leaving it failed on every subsequent run.
+            _run_mip_encode(dataset_by_key[dataset_key], registry, mip_fps)
+        _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
     print(f"[backfill] Phase A complete. {len(pending)} dataset(s) still awaiting deskew resolution.")
     while pending:

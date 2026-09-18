@@ -154,7 +154,21 @@ def detect_rois(
     aborted after 1). Returns `(top_roi, bot_roi, signal_flag)` -- a 'dud'
     still gets a usable (centered default-size) ROI pair, so it still flows
     through crop/deskew/MIP, just at lower priority.
+
+    Skips the real detection once `mip_encode` is already `done`: at that
+    point `crop_and_convert`/`submit_deskew_ticket` are registry-gated
+    no-ops that ignore whatever ROI this returns, so re-reading the raw
+    file to re-derive it on every watch pass (this call happens twice per
+    pass -- once from `backfill/cli.py`'s Phase 0 triage, once again here
+    from Phase A) was pure waste. Confirmed live: a handful of large,
+    single-timepoint calibration datasets re-triaged this way every 120s
+    were slow/heavy enough (a full-stack projection, see
+    `compute_reference_projection`) to occupy the entire worker pool and
+    starve real pending datasets.
     """
+    if registry.is_stage_done(ds.dataset_key, "mip_encode"):
+        return None, None, "unknown"
+
     registry.start_stage(ds.dataset_key, "roi_detect")
     try:
         z = _open_lazy_zarr(ds.master_file)
@@ -466,11 +480,31 @@ def build_zarr_pyramid_mirror(
         zarray = _read_zarray(pixel_dir)
         shape = zarray["shape"]
 
-        if len(shape) < 4 or shape[0] == 1:
-            # 3D store (or a degenerate 4D with T=1): one mirrored store,
-            # `.zarray` symlinked straight through -- its shape already
-            # matches what PetaKit5D should read.
+        if len(shape) < 4:
+            # Already-3D store: `.zarray` symlinked straight through -- its
+            # shape already matches what PetaKit5D should read.
             _mirror_store_dir(mirror_dir / store.name, pixel_dir, pixel_dir / ".zarray")
+            continue
+
+        if shape[0] == 1:
+            # Degenerate 4D (single real timepoint): still needs the same
+            # leading-axis-stripped 3D view as the true time-series branch
+            # below -- confirmed live that leaving `.zarray` as 4D
+            # (T=1,Z,Y,X) and symlinking `pixel_dir` itself (whose chunk
+            # keys are then genuinely 4-deep, `<T>/<Z>/<Y>/<X>`) produces a
+            # self-consistent 4D array that PetaKit5D's C++ zarr reader --
+            # strictly 3D -- can't read: it derives an expected per-chunk
+            # byte size from the wrong 3 of the 4 chunk-shape entries, then
+            # fails to decompress the real (differently-sized) chunk with a
+            # generic "Decompression error. Error code: 0".
+            #
+            # Mirror directory naming intentionally stays `store.name` (NOT
+            # the `_C{c}_T000` movie convention used below) -- unlike a
+            # real time series, `_run_mip_encode`'s single-timepoint
+            # ("poster") branch matches PetaKit5D's MIP output against
+            # `channel_zarr_paths` names, not per-timepoint names.
+            zarray_3d = json.dumps({**zarray, "shape": shape[1:], "chunks": zarray["chunks"][1:]})
+            _mirror_store_dir(mirror_dir / store.name, pixel_dir / "0", zarray_3d)
             continue
 
         # 4D time series -> one 3D mirrored store per timepoint. The 3D
