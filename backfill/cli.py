@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import shutil
 import time
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
@@ -30,11 +31,15 @@ from backfill.mip_movie import (
     build_poster_for_zarr_dataset,
     find_mip_files,
 )
+from backfill.viewer_export import channel_label, export_for_viewers
 from backfill.pipeline import (
     dataset_timepoints,
     detect_rois,
+    dsr_output_dir,
     process_crop_and_submit,
     process_zarr_precropped_dataset,
+    resolve_decon_psf,
+    zarr_deskew_data_dir,
 )
 
 # Crop-queue submission order, lowest first -- 'ok' (real signal detected)
@@ -123,10 +128,17 @@ def _crop_worker(
 
 
 def _dsr_dir_for(ds: LeafDataset) -> Path:
-    """Where PetaKit5D actually wrote (or will write) `DSR_nodecon/` for
-    this dataset. KIND_ZARR_PRECROPPED has no crop stage, so the ticket's
-    `dataDir` is `ds.leaf_dir / "zarr_mirror"` (see
-    `submit_zarr_deskew_ticket`'s `mirror_dir` / `build_zarr_pyramid_mirror`)
+    """Where PetaKit5D actually wrote (or will write) the DSR output for
+    this dataset.
+
+    Both the directory NAME (`DSR_nodecon` vs `DSR_decon`) and, for
+    KIND_ZARR_PRECROPPED, its PARENT (`zarr_mirror/` vs `decon_stage/`)
+    depend on whether deconvolution is enabled, so both are derived from the
+    same helpers `submit_*_deskew_ticket` used when naming the output --
+    never restated here. Restating them is exactly how this function went
+    wrong twice before. KIND_ZARR_PRECROPPED has no crop stage, so the ticket's
+    `dataDir` is the mirror or staging dir under `ds.leaf_dir` (see
+    `submit_zarr_deskew_ticket` / `zarr_deskew_data_dir`)
     -- confirmed against a real completed job that PetaKit5D writes
     `DSR_nodecon` *inside* that `dataDir`, not as its sibling: the previous
     `ds.leaf_dir / "DSR_nodecon"` (one level too shallow) caused every real
@@ -140,9 +152,95 @@ def _dsr_dir_for(ds: LeafDataset) -> Path:
     convention to report the same "No MIP TIFFs found" symptom even though
     PetaKit5D had already written complete output to the other directory.
     """
+    psf = resolve_decon_psf()
     if ds.kind == KIND_ZARR_PRECROPPED:
-        return ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"
-    return resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon"
+        data_dir = zarr_deskew_data_dir(ds, psf)
+    else:
+        data_dir = resolve_deskew_working_dir(ds.master_file)
+    return dsr_output_dir(data_dir, psf)
+
+
+def _reap_decon_intermediates(ds: LeafDataset) -> None:
+    """Drop the two large decon intermediates once DSR + MIPs exist.
+
+    Deconvolution costs roughly three extra copies of the raw data on disk:
+    the staged `(ny, nx, nz)` TIFFs, PetaKit5D's `Decon/` output, and the
+    final DSR. Only the last is wanted long-term -- the first two are fully
+    reproducible from the raw stores and the recorded PSF.
+
+    `Decon/psfgen/` is preserved first, though: it holds the cleaned PSF
+    `psf_gen_new` actually used, the generated OMW back-projector, and the
+    OTF-mask figure. That is the only on-disk evidence of what decon really
+    ran with, and it is tiny. Set OPYM_KEEP_DECON_INTERMEDIATES=1 to keep
+    everything (e.g. while tuning wienerAlpha, where re-staging every sweep
+    is pure waste).
+    """
+    if os.environ.get("OPYM_KEEP_DECON_INTERMEDIATES"):
+        return
+    psf = resolve_decon_psf()
+    if psf is None:
+        return
+    if ds.kind == KIND_ZARR_PRECROPPED:
+        data_dir = zarr_deskew_data_dir(ds, psf)
+    else:
+        try:
+            data_dir = resolve_deskew_working_dir(ds.master_file)
+        except FileNotFoundError:
+            return
+
+    decon_dir = data_dir / "Decon"
+    psfgen = decon_dir / "psfgen"
+    if psfgen.is_dir():
+        qc_dir = ds.leaf_dir / "decon_qc"
+        try:
+            if qc_dir.exists():
+                shutil.rmtree(qc_dir)
+            shutil.copytree(psfgen, qc_dir)
+        except OSError as e:  # noqa: BLE001 - QC is nice-to-have, never fatal
+            print(f"[backfill] {ds.dataset_key}: could not preserve psfgen QC: {e}")
+
+    # Delete the per-frame decon TIFFs, NOT the directory: PetaKit5D nests the
+    # final DSR result INSIDE it, at Decon/DSR_decon (see dsr_output_dir --
+    # run_petakit_server.m sets current_input_dir = <dataDir>/Decon before the
+    # deskew step). rmtree(decon_dir) therefore deleted the one output this
+    # function exists to keep, along with its MIPs.
+    if decon_dir.is_dir():
+        for frame in decon_dir.glob("*.tif"):
+            frame.unlink(missing_ok=True)
+        if psfgen.is_dir():
+            shutil.rmtree(psfgen, ignore_errors=True)
+    if ds.kind == KIND_ZARR_PRECROPPED:
+        # The staged TIFFs sit directly in `data_dir`, alongside the DSR
+        # output subdirectory -- so drop the frames, not the directory.
+        for frame in data_dir.glob("*.tif"):
+            frame.unlink(missing_ok=True)
+
+
+def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
+    """Make the finished DSR openable in ChimeraX and napari without extra steps.
+
+    PetaKit5D writes the DSR result with no resolution metadata at all, so both
+    viewers show it at 1 px per unit and the volume looks anisotropic the
+    moment you rotate it. This stamps each frame as an OME-TIFF (which
+    ChimeraX reads exactly) and builds a pyramidal OME-Zarr beside it (which
+    napari reads, with the channels named) -- see backfill/viewer_export.py
+    for why both are needed.
+
+    Never fatal: the science output is already on disk and correct at this
+    point, so a viewer-convenience failure must not mark the dataset failed.
+    """
+    if os.environ.get("OPYM_SKIP_VIEWER_EXPORT"):
+        return
+    try:
+        labels = [channel_label(p.name) for p in ds.channel_zarr_paths] if ds.channel_zarr_paths else None
+        summary = export_for_viewers(
+            dsr_dir, ds.leaf_dir / "viewer",
+            name=ds.leaf_dir.name, channel_labels=labels,
+        )
+        print(f"[backfill] {ds.dataset_key}: viewer export -- {summary['frames']} frame(s), "
+              f"{summary['stamped']} stamped, {summary['ome_zarr']}")
+    except Exception as e:  # noqa: BLE001 - convenience output, never fatal
+        print(f"[backfill] {ds.dataset_key}: viewer export failed (DSR output is unaffected): {e}")
 
 
 def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -> None:
@@ -178,6 +276,8 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
             sanitized_name = sanitize_filename(ds.master_file.name)
             build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
         registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
+        _reap_decon_intermediates(ds)
+        _export_for_viewers(ds, dsr_dir)
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
         registry.finish_stage(ds.dataset_key, "mip_encode", status="failed", error=str(e))
         print(f"[backfill] {ds.dataset_key}: mip_encode failed: {e}")

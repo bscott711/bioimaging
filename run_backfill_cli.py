@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Entry point: opym-backfill -- bulk no-decon crop/zarr/deskew/MIP backfill.
+"""Entry point: opym-backfill -- bulk crop/zarr/deskew/MIP backfill.
+
+Deconvolution is opt-in via --decon-psf; without it this is the
+deskew-only pipeline it has always been.
 
 Thin orchestrator, matching the run_pipeline_cli.py/run_napari_opym.py
 convention: business logic lives in backfill/, this just parses args.
 """
 
 import argparse
+import os
 from pathlib import Path
 
 from backfill.cli import DEFAULT_REGISTRY_PATH, run_backfill, watch_backfill
@@ -20,9 +24,9 @@ DEFAULT_ROOTS = [
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Bulk backfill: crop -> channel-remap -> zarr -> deskew/rotate "
-            "(decon skipped) -> MIP, across every raw OPM acquisition found "
-            "under the given data roots."
+            "Bulk backfill: crop -> channel-remap -> zarr -> [optional decon] "
+            "-> deskew/rotate -> MIP, across every raw OPM acquisition found "
+            "under the given data roots. Decon is off unless --decon-psf is given."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -72,6 +76,18 @@ def main():
         help="Frame rate for encoded MIP movies.",
     )
     parser.add_argument(
+        "--decon-psf",
+        type=Path,
+        default=None,
+        help=(
+            "Deconvolve with this PSF before deskewing, writing to DSR_decon/ "
+            "instead of DSR_nodecon/ so existing no-decon output is preserved. "
+            "Omit for deskew-only (the default, unchanged). The PSF must be a "
+            "measured, skewed-space PSF whose 3rd MATLAB dimension is the scan "
+            "axis; see backfill/pipeline.py's build_decon_staging_dir."
+        ),
+    )
+    parser.add_argument(
         "--watch",
         type=float,
         default=None,
@@ -83,6 +99,19 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    # Exported rather than threaded through as an argument: the backfill fans
+    # datasets out across a process pool, and an env var reaches every worker
+    # without changing any worker signature -- the same mechanism
+    # OPYM_ZARR_MAX_TIMEPOINTS / OPYM_ZARR_ALLOW_DEFAULT_Z_STEP already use.
+    # backfill.pipeline.resolve_decon_psf() reads it.
+    if args.decon_psf is not None:
+        psf = args.decon_psf.expanduser().resolve()
+        if not psf.is_file():
+            parser.error(f"--decon-psf {psf} is not a file")
+        os.environ["OPYM_DECON_PSF"] = str(psf)
+        print(f"[backfill] Deconvolution ENABLED with PSF {psf}")
+        print("[backfill] Output -> DSR_decon/ (DSR_nodecon/ left untouched)")
 
     if args.watch is not None:
         watch_backfill(

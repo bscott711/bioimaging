@@ -17,6 +17,7 @@ import shutil
 import traceback
 from pathlib import Path
 
+import numpy as np
 import tifffile
 import zarr
 from opym.core import run_processing_job
@@ -25,10 +26,29 @@ from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.registry import StatusRegistry
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
-from opym.utils import OutputFormat, derive_paths, scan_channel_patterns
+from opym.utils import (
+    OutputFormat,
+    derive_paths,
+    orient_zyx_for_decon_tiff,
+    scan_channel_patterns,
+)
 from psf_tools.extraction_plan import get_extraction_plan
 
 from backfill.mip_movie import encode_poster_image, normalize_for_video
+
+# Deconvolution settings, fixed here rather than left to PetaKit5D's defaults.
+# Both defaults are wrong for this data and both fail quietly:
+#   * wienerAlpha defaults to 0.005, which is visibly over-sharpened on these
+#     volumes. 0.02 is the value the decon-order comparison was run and judged at.
+#   * edgeErosion defaults to 0, which leaves a bright ringing stripe along the
+#     slab boundary -- RLdecon.m applies `edgetaper` per z-PLANE, so the axial
+#     faces are never tapered and the FFT wraps there. Eroding 3 voxels removes
+#     it, for ~6% of the imaged slab.
+# Changing either of these changes what the output looks like, so they belong
+# in the ticket (and therefore the log) rather than in a MATLAB default.
+DECON_WIENER_ALPHA = 0.02
+DECON_EDGE_EROSION = 3
+
 
 
 class DatasetProcessingError(Exception):
@@ -281,12 +301,18 @@ def crop_and_convert(
 def submit_deskew_ticket(
     ds: LeafDataset, tiff_out_dir: Path, registry: StatusRegistry
 ) -> Path | None:
-    """Submits a decon-skipped deskew+rotate+MIP ticket via the *existing*
-    `submit_remote_deskew_job` -- passing `psf_path=None` is the entire
-    decon-skip switch (the ticket's `run_decon` server-side default is
-    `~isempty(psf_path)`). Routes through the 'deskew' job type, NOT
+    """Submits a deskew+rotate+MIP ticket via the *existing*
+    `submit_remote_deskew_job`, optionally deconvolving first. `psf_path` is
+    the entire decon switch (the ticket's `run_decon` server-side default is
+    `~isempty(psf_path)`); `resolve_decon_psf()` returns None unless
+    `--decon-psf` / `OPYM_DECON_PSF` is set, so the default is deskew-only,
+    exactly as before. Routes through the 'deskew' job type, NOT
     `submit_pipeline_job`'s fused GPU 'pipeline' route, which has no
     skip-decon toggle.
+
+    Unlike the zarr path, this needs no staging step: the crop stage already
+    wrote its TIFFs in the rot90'd `(ny, nx, nz)` layout decon requires (and
+    that the measured PSF itself carries). See `build_decon_staging_dir`.
 
     Returns the ticket path if one is pending resolution (freshly submitted,
     or already submitted by a prior run and not yet resolved), or None if
@@ -294,15 +320,33 @@ def submit_deskew_ticket(
     uses the returned path to know what to watch; None means "nothing to
     watch, already finished."
     """
-    if registry.is_stage_done(ds.dataset_key, "deskew"):
+    decon_psf = resolve_decon_psf()
+    if registry.is_stage_done(ds.dataset_key, "deskew") and decon_provenance_matches(
+        registry, ds.dataset_key, decon_psf
+    ):
         return None
 
     existing = registry.get_stage(ds.dataset_key, "deskew")
-    if existing and existing["status"] == "running" and existing["ticket_path"]:
+    # Reuse an in-flight ticket only when it is for the configuration we
+    # want. Provenance is recorded at SUBMIT time (see set_decon_psf below),
+    # so a genuinely running job already matches; a `running` row left over
+    # from an interrupted deskew-only pass does not, and would otherwise pin
+    # the dataset to a ticket that will never produce decon output.
+    if (
+        existing
+        and existing["status"] == "running"
+        and existing["ticket_path"]
+        and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
+    ):
         return Path(existing["ticket_path"])
     if existing and existing["status"] == "failed":
         try:
-            _clean_stale_deskew_output(resolve_deskew_working_dir(ds.master_file) / "DSR_nodecon")
+            work_dir = resolve_deskew_working_dir(ds.master_file)
+            _clean_stale_deskew_output(dsr_output_dir(work_dir, decon_psf))
+            # See submit_zarr_deskew_ticket: PetaKit5D reuses an existing
+            # Decon frame rather than recomputing it, so a stale one (from a
+            # failed run, or a different PSF/alpha) must go.
+            _clean_stale_deskew_output(work_dir / "Decon")
         except FileNotFoundError:
             pass
 
@@ -316,11 +360,19 @@ def submit_deskew_ticket(
         z_step_um=z_step_um,
         deskew=True,
         rotate=True,
-        psf_path=None,
-        dsr_dir_name="DSR_nodecon",
+        psf_path=decon_psf,
+        dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
+        wiener_alpha=DECON_WIENER_ALPHA,
+        edge_erosion=DECON_EDGE_EROSION,
+        # Without this the ticket carries gpu_decon:false and PetaKit5D runs
+        # the RL iterations on CPU -- both cards sit at 0% while the parfor
+        # pool grinds. The volumes are small in skewed space (~29M voxels),
+        # so this fits many times over in 97 GB.
+        gpu_decon=True,
         save_mip=True,
     )
+    registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
     return ticket_path
 
@@ -566,6 +618,199 @@ def build_zarr_pyramid_mirror(
     return mirror_dir
 
 
+def resolve_decon_psf() -> Path | None:
+    """The PSF deconvolution should run with, or None for deskew-only.
+
+    Read from the `OPYM_DECON_PSF` environment variable rather than threaded
+    through as an argument, matching how the other run-scoped switches here
+    work (`OPYM_ZARR_MAX_TIMEPOINTS`, `OPYM_ZARR_ALLOW_DEFAULT_Z_STEP`): the
+    backfill fans datasets out across a process pool, and an env var is
+    inherited by every worker without changing any worker signature.
+    `run_backfill_cli.py --decon-psf` sets it.
+
+    Unset means today's behavior exactly -- no decon, `DSR_nodecon`.
+    """
+    raw = os.environ.get("OPYM_DECON_PSF", "").strip()
+    if not raw:
+        return None
+    psf = Path(raw).expanduser()
+    if not psf.is_file():
+        raise FileNotFoundError(
+            f"OPYM_DECON_PSF points at {psf}, which is not a file. Refusing to "
+            "fall back to deskew-only silently -- unset it to run without decon."
+        )
+    return psf.resolve()
+
+
+def dsr_dir_name_for(psf: Path | None) -> str:
+    """Output directory name for a DSR result, keyed on whether decon ran.
+
+    Deconvolved output goes to a DIFFERENT directory than deskew-only output
+    so the two can coexist and be compared, and so enabling decon never
+    silently overwrites the existing no-decon archive. Both
+    `submit_*_deskew_ticket` (which names the output) and `_dsr_dir_for` in
+    `backfill/cli.py` (which finds it again afterwards) must derive it from
+    here, or the reader looks in the wrong place -- the exact bug class
+    `_dsr_dir_for`'s own docstring documents twice.
+
+    The bare name `DSR` is deliberately not used: the PSF-tuning harnesses
+    (`psf_tools/sweep_deskew_angles.py`, `psf_tools/omw_rl_comparison.py`)
+    already write unrelated output under that name.
+    """
+    return "DSR_decon" if psf else "DSR_nodecon"
+
+
+def dsr_output_dir(data_dir: Path, psf: Path | None) -> Path:
+    """Where PetaKit5D actually writes the DSR result, given the ticket's
+    `dataDir`.
+
+    PetaKit5D writes DS/DSR *inside* whatever directory it was handed as
+    `dataDir`. When decon runs first, the deskew step is not handed the
+    ticket's `dataDir` -- `run_petakit_server.m` sets
+    `current_input_dir = fullfile(job.dataDir, 'Decon')` and passes that
+    instead -- so the DSR output nests one level deeper, under `Decon/`.
+
+    Confirmed against a real completed job: with decon on, the output landed
+    at `<dataDir>/Decon/DSR_decon`, not `<dataDir>/DSR_decon`. Getting this
+    wrong is the same "No MIP TIFFs found on output that exists one directory
+    over" failure `_dsr_dir_for` has already hit twice.
+    """
+    base = data_dir / "Decon" if psf else data_dir
+    return base / dsr_dir_name_for(psf)
+
+
+def decon_provenance_matches(registry, dataset_key: str, psf: Path | None) -> bool:
+    """True when the output already on disk was made with the PSF we are about
+    to use.
+
+    `is_stage_done(..., "deskew")` alone is not enough to skip a dataset: a
+    stage is only "done" for the PSF it was done WITH. Switching decon on for a
+    corpus that was deskewed without it -- or changing PSF -- otherwise looks
+    like a no-op, because every dataset reports itself already complete and
+    nothing recomputes. That is the same silent-skip failure mode as
+    PetaKit5D's own `if exist(deconFullpath,'file')`.
+    """
+    recorded = registry.get_decon_psf(dataset_key)
+    return recorded == (str(psf) if psf else None)
+
+
+def zarr_deskew_data_dir(ds: LeafDataset, psf: Path | None) -> Path:
+    """The ticket `dataDir` for a KIND_ZARR_PRECROPPED dataset.
+
+    Deskew-only reads the cheap symlink mirror; decon reads the materialized
+    `(ny, nx, nz)` TIFFs (see `build_decon_staging_dir` for why it cannot
+    share the mirror). PetaKit5D writes its DS/DSR/Decon output *inside*
+    whichever of these is the `dataDir`, so `_dsr_dir_for` in
+    `backfill/cli.py` must resolve through here too.
+    """
+    return ds.leaf_dir / ("decon_stage" if psf else "zarr_mirror")
+
+
+def build_decon_staging_dir(
+    channel_zarr_paths: tuple[Path, ...],
+    staging_dir: Path,
+    *,
+    dataset_prefix: str | None = None,
+    max_timepoints: int | None = None,
+) -> Path:
+    """Materialize a zarr-precropped acquisition as per-timepoint TIFFs in the
+    `(ny, nx, nz)` layout PetaKit5D's deconvolution requires.
+
+    Why this exists rather than reusing the symlink mirror: deconvolution is
+    a 3D convolution, and PetaKit5D's decon path (XR_decon_data_wrapper ->
+    XR_RLdeconFrame3D -> RLdecon) has NO axis-order parameter -- it convolves
+    the array exactly as stored. `inputAxisOrder='zxy'`, which corrects the
+    mirror's `(z, y, x)` layout, is an argument to
+    XR_deskew_rotate_data_wrapper and is applied inside XR_deskewRotateFrame,
+    i.e. AFTER decon has already run. Deconvolving the mirror directly would
+    convolve the 1458-px coverslip axis with the PSF's 81-plane z kernel and
+    report success. Permuting the PSF instead does not rescue it: `psf_gen_new`
+    resamples PSF dim 3 from dz_psf to dz_data, and
+    `omw_backprojector_generation` with `skewed=true` builds its OTF mask as
+    `cat(3, ...)` -- both hard-code dim 3 == scan Z.
+
+    So the pixels have to be rewritten. That puts the zarr path onto exactly
+    the same footing as the legacy OME-TIFF path, whose cropper has always
+    applied the same rot90 (`opym.utils.orient_zyx_for_decon_tiff`) -- which
+    is also the orientation the measured PSF itself carries
+    (`psf_tools/extract_bead_psf.py` applies `np.rot90(k=1, axes=(1,2))`).
+    The ticket is then submitted with `zarr_input=False`, so
+    `input_axis_order` derives to `'yxz'` and no permute happens at all.
+
+    Naming matches `build_zarr_pyramid_mirror`'s exactly -- `_C{c}_T{ttt}` for
+    a time series, the store's own `.ome`-preserving name for a single
+    timepoint -- so `channel_patterns` and `_run_mip_encode`'s output matching
+    both work unchanged.
+
+    Symlinking is not an option here (the bytes genuinely differ), so this
+    does cost a transposed copy of the raw data; `zlib` keeps it to roughly a
+    quarter of the raw size on this dim data. `backfill/cli.py` deletes it
+    once `mip_encode` succeeds.
+    """
+    def _write_staged(volume_zyx, dst: Path) -> None:
+        if dst.exists():
+            return
+        oriented = orient_zyx_for_decon_tiff(np.asarray(volume_zyx))
+        # Write-then-rename: a half-written TIFF is not merely incomplete, it
+        # poisons every subsequent retry, because PetaKit5D's `readtiff`
+        # raises on it and the skip-if-present check above would keep handing
+        # it back. Same reasoning as `_clean_stale_deskew_output`.
+        tmp = dst.with_name(dst.name + ".tmp")
+        tifffile.imwrite(tmp, oriented, compression="zlib")
+        os.replace(tmp, dst)
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    built: set[Path] = set()
+    for cidx, store in enumerate(channel_zarr_paths):
+        if not _zarr_store_is_ready(store):
+            raise FileNotFoundError(
+                f"{store} is missing .zattrs or its main pixel-data array -- "
+                "likely still mid-Globus-transfer, will retry on next run"
+            )
+        pixel_dir = store / _read_ome_zarr_dataset_path(store)
+        arr = zarr.open(str(pixel_dir), mode="r")
+        # Single-timepoint stores keep the store's own name (minus only
+        # `.zarr`, so the `.ome` component survives) because
+        # `_run_mip_encode`'s poster branch matches PetaKit5D's MIP output
+        # against exactly that -- see its comment.
+        single_name = store.name.removesuffix(".zarr") + ".tif"
+
+        if arr.ndim == 3:
+            dst = staging_dir / single_name
+            built.add(dst)
+            _write_staged(arr, dst)
+            continue
+        if arr.shape[0] == 1:
+            dst = staging_dir / single_name
+            built.add(dst)
+            _write_staged(arr[0], dst)
+            continue
+
+        n_t = arr.shape[0] if max_timepoints is None else min(arr.shape[0], max_timepoints)
+        prefix = dataset_prefix or parse_zarr_group_prefix(store)
+        for t in range(n_t):
+            if not (pixel_dir / str(t)).is_dir():
+                # A store can declare more timepoints than it wrote (aborted
+                # acquisition); callers clamp, but don't take the dataset
+                # down if one slips through.
+                print(f"   Skipping T{t:03d} of {store.name}: no chunk data")
+                continue
+            dst = staging_dir / f"{prefix}_C{cidx}_T{t:03d}.tif"
+            built.add(dst)
+            _write_staged(arr[t], dst)
+
+    # Same stale-output hazard the mirror guards against: a staging dir built
+    # when more timepoints existed would leave frames that still match
+    # `_C{c}_T` and make the per-channel counts diverge downstream.
+    for entry in staging_dir.glob("*.tif"):
+        if entry not in built and entry.is_file():
+            print(f"   Removing stale staged frame {entry.name}")
+            entry.unlink()
+    for entry in staging_dir.glob("*.tif.tmp"):
+        entry.unlink()
+    return staging_dir
+
+
 def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
     """`submit_deskew_ticket`'s counterpart for `KIND_ZARR_PRECROPPED`
     datasets: no crop stage exists for these (already cropped/channel-split
@@ -591,14 +836,33 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     in `backfill/cli.py`) -- i.e. still fully within `ds.leaf_dir`, never
     colliding with a sibling dataset sharing the same raw directory.
     """
-    if registry.is_stage_done(ds.dataset_key, "deskew"):
+    decon_psf = resolve_decon_psf()
+    if registry.is_stage_done(ds.dataset_key, "deskew") and decon_provenance_matches(
+        registry, ds.dataset_key, decon_psf
+    ):
         return None
 
     existing = registry.get_stage(ds.dataset_key, "deskew")
-    if existing and existing["status"] == "running" and existing["ticket_path"]:
+    # Reuse an in-flight ticket only when it is for the configuration we
+    # want. Provenance is recorded at SUBMIT time (see set_decon_psf below),
+    # so a genuinely running job already matches; a `running` row left over
+    # from an interrupted deskew-only pass does not, and would otherwise pin
+    # the dataset to a ticket that will never produce decon output.
+    if (
+        existing
+        and existing["status"] == "running"
+        and existing["ticket_path"]
+        and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
+    ):
         return Path(existing["ticket_path"])
+    data_dir = zarr_deskew_data_dir(ds, decon_psf)
     if existing and existing["status"] == "failed":
-        _clean_stale_deskew_output(ds.leaf_dir / "zarr_mirror" / "DSR_nodecon")
+        _clean_stale_deskew_output(dsr_output_dir(data_dir, decon_psf))
+        # PetaKit5D skips a decon frame whose output already exists
+        # (`if exist(deconFullpath, 'file')`), so a Decon/ left behind by a
+        # failed run -- or by a run with a different PSF or wienerAlpha --
+        # would be silently reused forever instead of recomputed.
+        _clean_stale_deskew_output(data_dir / "Decon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     # Prefer the stores' own `z` coordinate array over the MDA_settings.yaml
@@ -615,11 +879,23 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     # stage is retried every backfill pass and self-heals the moment the
     # coordinate arrays land. Set OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 to process
     # one anyway, knowingly.
+    # OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 falls back to 0.3, which is a guess and
+    # wrong for every dataset in this corpus (they are 0.1 or 0.5). When a
+    # store is missing its coordinate arrays but the real step is known --
+    # e.g. from sibling acquisitions in the same session -- name the value
+    # with OPYM_ZARR_DEFAULT_Z_STEP=<um> instead of accepting 0.3.
     allow_default = os.environ.get("OPYM_ZARR_ALLOW_DEFAULT_Z_STEP")
+    explicit_default = os.environ.get("OPYM_ZARR_DEFAULT_Z_STEP")
+    if explicit_default:
+        fallback_z: float | None = float(explicit_default)
+    elif allow_default:
+        fallback_z = 0.3
+    else:
+        fallback_z = None
     z_step_um, z_step_source = resolve_zarr_z_step(
         ds.channel_zarr_paths,
         mda_settings_file,
-        default_z_step=0.3 if allow_default else None,
+        default_z_step=fallback_z,
     )
     if z_step_um is None:
         msg = (
@@ -638,22 +914,37 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     # Cap the mirror at the timepoints every channel actually wrote rather
     # than the count the stores declare (see `channel_store_timepoints`).
     max_t = n_timepoints if env_cap is None else min(n_timepoints, env_cap)
-    mirror_dir = build_zarr_pyramid_mirror(
-        ds.channel_zarr_paths,
-        ds.leaf_dir / "zarr_mirror",
-        dataset_prefix=ds.leaf_dir.name,
-        max_timepoints=max_t,
-    )
+    if decon_psf:
+        # Decon needs real (ny, nx, nz) pixels, not the mirror's (z, y, x)
+        # view -- see build_decon_staging_dir. Submitting with
+        # zarr_input=False then makes input_axis_order derive to 'yxz', i.e.
+        # no permute, exactly like the legacy OME-TIFF path.
+        input_dir = build_decon_staging_dir(
+            ds.channel_zarr_paths,
+            data_dir,
+            dataset_prefix=ds.leaf_dir.name,
+            max_timepoints=max_t,
+        )
+    else:
+        input_dir = build_zarr_pyramid_mirror(
+            ds.channel_zarr_paths,
+            data_dir,
+            dataset_prefix=ds.leaf_dir.name,
+            max_timepoints=max_t,
+        )
     if n_timepoints > 1:
-        # Exploded per-timepoint mirror -> match every frame of a channel.
-        # Safe (not the usual full-filename pattern) because the mirror dir
+        # Exploded per-timepoint frames -> match every frame of a channel.
+        # Safe (not the usual full-filename pattern) because the input dir
         # is this dataset's own private namespace, no sibling collision.
         channel_patterns = [f"_C{i}_T" for i in range(len(ds.channel_zarr_paths))]
     else:
-        channel_patterns = [p.name for p in ds.channel_zarr_paths]
+        # Strip only the container extension, so the `.ome` component
+        # survives and the pattern matches both the mirror's `<name>.ome.zarr`
+        # and the staged `<name>.ome.tif`.
+        channel_patterns = [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
 
     ticket_path = submit_remote_deskew_job(
-        input_target=mirror_dir,
+        input_target=input_dir,
         z_step_um=z_step_um,
         # Passed explicitly rather than left to the signature default so the
         # value this pipeline actually relies on shows up in the ticket and
@@ -665,12 +956,20 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         xy_pixel_size=0.136,
         deskew=True,
         rotate=True,
-        psf_path=None,
-        dsr_dir_name="DSR_nodecon",
+        psf_path=decon_psf,
+        dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
+        wiener_alpha=DECON_WIENER_ALPHA,
+        edge_erosion=DECON_EDGE_EROSION,
+        # Without this the ticket carries gpu_decon:false and PetaKit5D runs
+        # the RL iterations on CPU -- both cards sit at 0% while the parfor
+        # pool grinds. The volumes are small in skewed space (~29M voxels),
+        # so this fits many times over in 97 GB.
+        gpu_decon=True,
         save_mip=True,
-        zarr_input=True,
+        zarr_input=decon_psf is None,
     )
+    registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
     return ticket_path
 
