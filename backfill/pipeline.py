@@ -21,7 +21,7 @@ import tifffile
 import zarr
 from opym.core import run_processing_job
 from opym.discovery import LeafDataset, parse_zarr_group_prefix
-from opym.metadata import parse_expected_timepoints, parse_z_step, parse_zarr_z_step
+from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.registry import StatusRegistry
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
@@ -361,24 +361,48 @@ def _read_zarray(pixel_dir: Path) -> dict:
 
 
 def channel_store_timepoints(store: Path) -> int:
-    """Number of timepoints on a per-channel zarr store's pixel array: 1
-    for a 3D `(z, y, x)` store, `T` for a 4D `(t, z, y, x)` one (the newer
+    """Number of *written* timepoints on a per-channel zarr store's pixel
+    array: 1 for a 3D `(z, y, x)` store, else the number of per-timepoint
+    chunk directories present on a 4D `(t, z, y, x)` one (the newer
     pymmcore MDA writer's live-imaging output -- e.g. every macropinocytosis
-    dataset). The `.zattrs` axes list would say the same thing, but the
-    `.zarray` shape is the ground truth PetaKit5D actually reads.
+    dataset).
+
+    The `.zarray` shape is what PetaKit5D reads, but it reports the
+    *declared* length -- what the acquisition was configured to collect, not
+    what it finished. An aborted acquisition leaves a store declaring
+    `t=100` with only `p0/0/` .. `p0/78/` on disk (real example: one cell in
+    the 20260902 upload has 80 written on one channel and 79 on the other).
+    Trusting the declared length made `build_zarr_pyramid_mirror` try to
+    mirror a chunk directory that does not exist, which raises
+    FileNotFoundError and takes the whole dataset's submission down with it.
     """
-    shape = _read_zarray(store / _read_ome_zarr_dataset_path(store))["shape"]
-    return int(shape[0]) if len(shape) >= 4 else 1
+    pixel_dir = store / _read_ome_zarr_dataset_path(store)
+    shape = _read_zarray(pixel_dir)["shape"]
+    if len(shape) < 4:
+        return 1
+    written = sum(1 for e in pixel_dir.iterdir() if e.name.isdigit() and e.is_dir())
+    return min(int(shape[0]), written)
 
 
 def dataset_timepoints(ds: LeafDataset) -> int:
-    """Timepoint count for a KIND_ZARR_PRECROPPED dataset -- the max across
-    its channel stores (they should agree; `max` so a ragged/partial store
-    can't silently shorten the series)."""
-    return max(
-        (channel_store_timepoints(s) for s in ds.channel_zarr_paths),
-        default=1,
-    )
+    """Timepoint count for a KIND_ZARR_PRECROPPED dataset -- the `min`
+    across its channel stores.
+
+    `min`, not `max`: a timepoint is only usable once every channel has
+    written it, and an interrupted acquisition genuinely stops mid-timepoint
+    with one channel a frame ahead of the other. Taking the max would mirror
+    a timepoint that one channel never wrote.
+    """
+    per_channel = [channel_store_timepoints(s) for s in ds.channel_zarr_paths]
+    if not per_channel:
+        return 1
+    if len(set(per_channel)) > 1:
+        print(
+            f"   [{ds.dataset_key}] channels disagree on timepoint count "
+            f"{per_channel}; using {min(per_channel)} (acquisition likely "
+            "interrupted mid-timepoint)"
+        )
+    return min(per_channel)
 
 
 def build_zarr_pyramid_mirror(
@@ -470,6 +494,7 @@ def build_zarr_pyramid_mirror(
                 entry.unlink()
 
     mirror_dir.mkdir(parents=True, exist_ok=True)
+    built: set[Path] = set()
     for cidx, store in enumerate(channel_zarr_paths):
         if not _zarr_store_is_ready(store):
             raise FileNotFoundError(
@@ -483,6 +508,7 @@ def build_zarr_pyramid_mirror(
         if len(shape) < 4:
             # Already-3D store: `.zarray` symlinked straight through -- its
             # shape already matches what PetaKit5D should read.
+            built.add(mirror_dir / store.name)
             _mirror_store_dir(mirror_dir / store.name, pixel_dir, pixel_dir / ".zarray")
             continue
 
@@ -504,6 +530,7 @@ def build_zarr_pyramid_mirror(
             # ("poster") branch matches PetaKit5D's MIP output against
             # `channel_zarr_paths` names, not per-timepoint names.
             zarray_3d = json.dumps({**zarray, "shape": shape[1:], "chunks": zarray["chunks"][1:]})
+            built.add(mirror_dir / store.name)
             _mirror_store_dir(mirror_dir / store.name, pixel_dir / "0", zarray_3d)
             continue
 
@@ -514,11 +541,28 @@ def build_zarr_pyramid_mirror(
         zarray_3d = json.dumps({**zarray, "shape": shape[1:], "chunks": zarray["chunks"][1:]})
         prefix = dataset_prefix or parse_zarr_group_prefix(store)
         for t in range(n_t):
-            _mirror_store_dir(
-                mirror_dir / f"{prefix}_C{cidx}_T{t:03d}.zarr",
-                pixel_dir / str(t),
-                zarray_3d,
-            )
+            chunk_src = pixel_dir / str(t)
+            if not chunk_src.is_dir():
+                # Belt and braces: callers already clamp `max_timepoints` to
+                # what was written, but a store declaring more timepoints
+                # than it holds must not take the whole dataset down with a
+                # FileNotFoundError out of `_mirror_store_dir`.
+                print(f"   Skipping T{t:03d} of {store.name}: {chunk_src} absent")
+                continue
+            dst = mirror_dir / f"{prefix}_C{cidx}_T{t:03d}.zarr"
+            built.add(dst)
+            _mirror_store_dir(dst, chunk_src, zarray_3d)
+    # Drop per-timepoint stores left over from an earlier build. Without
+    # this, a mirror built when the acquisition had written 69 timepoints
+    # keeps its T068 store after a rebuild clamped to 68 -- PetaKit5D still
+    # matches it on `_C0_T`, deskews it, and the channel counts diverge
+    # (69 vs 68), which is what broke Cell_002's mip_encode with
+    # "operands could not be broadcast together". `_mirror_store_dir` only
+    # prunes *within* a store, never whole stale stores.
+    for entry in mirror_dir.glob("*.zarr"):
+        if entry not in built and entry.is_dir():
+            print(f"   Removing stale mirror store {entry.name}")
+            shutil.rmtree(entry)
     return mirror_dir
 
 
@@ -557,10 +601,43 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         _clean_stale_deskew_output(ds.leaf_dir / "zarr_mirror" / "DSR_nodecon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
-    z_step_um = parse_zarr_z_step(mda_settings_file, default_z_step=0.3)
+    # Prefer the stores' own `z` coordinate array over the MDA_settings.yaml
+    # sidecar: the sidecar is not written per-acquisition, so this used to
+    # fall through to the 0.3 um default on every single dataset -- while
+    # the real step was 0.1 or 0.5 depending on the acquisition. Log the
+    # source so a defaulted step is visible in the backfill log instead of
+    # silently reaching PetaKit5D as a plausible-looking number.
+    #
+    # And refuse to guess by default: an interrupted or still-transferring
+    # acquisition has no `z` array yet (3 of ~100 datasets on disk), and
+    # deskewing one at a made-up 0.3 um just produces another silently
+    # wrong-sized volume that reports `done`. Deferring costs nothing -- the
+    # stage is retried every backfill pass and self-heals the moment the
+    # coordinate arrays land. Set OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 to process
+    # one anyway, knowingly.
+    allow_default = os.environ.get("OPYM_ZARR_ALLOW_DEFAULT_Z_STEP")
+    z_step_um, z_step_source = resolve_zarr_z_step(
+        ds.channel_zarr_paths,
+        mda_settings_file,
+        default_z_step=0.3 if allow_default else None,
+    )
+    if z_step_um is None:
+        msg = (
+            "cannot determine z step: no 'z' coordinate array in any channel "
+            f"store under {ds.raw_dir} and no MDA_settings.yaml. Deferring "
+            "rather than deskewing at a guessed scale (set "
+            "OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 to override)."
+        )
+        print(f"   [{ds.dataset_key}] SKIP -- {msg}")
+        registry.finish_stage(ds.dataset_key, "deskew", status="failed", error=msg)
+        return None
+    print(f"   [{ds.dataset_key}] z step {z_step_um} um (from {z_step_source})")
 
     n_timepoints = dataset_timepoints(ds)
-    max_t = int(os.environ.get("OPYM_ZARR_MAX_TIMEPOINTS", "0")) or None
+    env_cap = int(os.environ.get("OPYM_ZARR_MAX_TIMEPOINTS", "0")) or None
+    # Cap the mirror at the timepoints every channel actually wrote rather
+    # than the count the stores declare (see `channel_store_timepoints`).
+    max_t = n_timepoints if env_cap is None else min(n_timepoints, env_cap)
     mirror_dir = build_zarr_pyramid_mirror(
         ds.channel_zarr_paths,
         ds.leaf_dir / "zarr_mirror",
@@ -578,6 +655,14 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     ticket_path = submit_remote_deskew_job(
         input_target=mirror_dir,
         z_step_um=z_step_um,
+        # Passed explicitly rather than left to the signature default so the
+        # value this pipeline actually relies on shows up in the ticket and
+        # the log. The acquisition writer records no lateral pixel size
+        # (NGFF scale is the placeholder [1,1,1,1], frame_meta says
+        # pixel_size_um: 0.0), so there is nothing to read it from -- 0.136
+        # is the detection path's known value, unchanged from the legacy
+        # TIFF acquisitions.
+        xy_pixel_size=0.136,
         deskew=True,
         rotate=True,
         psf_path=None,
