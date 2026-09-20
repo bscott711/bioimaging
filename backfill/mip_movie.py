@@ -35,11 +35,12 @@ _MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
 _VP9_PARAMS = ["-deadline", "realtime", "-cpu-used", "8", "-crf", "32", "-b:v", "0"]
 
 # Fixed per-channel pseudo-colors for the additive composite view (RGB,
-# 0-1 floats) -- cyan/magenta/yellow/red covers the 4-channel-per-excitation
+# 0-1 floats) -- green/magenta/yellow/red covers the 4-channel-per-excitation
 # output map (see core.py: 0=Bot-C0, 1=Top-C0, 2=Top-C1, 3=Bot-C1) with
-# maximally distinguishable hues; extra channels beyond 4 cycle back.
+# maximally distinguishable hues; extra channels beyond 4 cycle back. The
+# common 2-channel case (one excitation) is green/magenta, not cyan/magenta.
 _CHANNEL_COLORS = [
-    (0.0, 1.0, 1.0),  # cyan
+    (0.0, 1.0, 0.0),  # green
     (1.0, 0.0, 1.0),  # magenta
     (1.0, 1.0, 0.0),  # yellow
     (1.0, 0.15, 0.15),  # red
