@@ -17,7 +17,6 @@ import shutil
 import traceback
 from pathlib import Path
 
-import numpy as np
 import tifffile
 import zarr
 from opym.core import run_processing_job
@@ -29,8 +28,8 @@ from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_re
 from opym.utils import (
     OutputFormat,
     derive_paths,
-    orient_zyx_for_decon_tiff,
     scan_channel_patterns,
+    write_decon_staged_tiff,
 )
 from psf_tools.extraction_plan import get_extraction_plan
 
@@ -747,18 +746,6 @@ def build_decon_staging_dir(
     quarter of the raw size on this dim data. `backfill/cli.py` deletes it
     once `mip_encode` succeeds.
     """
-    def _write_staged(volume_zyx, dst: Path) -> None:
-        if dst.exists():
-            return
-        oriented = orient_zyx_for_decon_tiff(np.asarray(volume_zyx))
-        # Write-then-rename: a half-written TIFF is not merely incomplete, it
-        # poisons every subsequent retry, because PetaKit5D's `readtiff`
-        # raises on it and the skip-if-present check above would keep handing
-        # it back. Same reasoning as `_clean_stale_deskew_output`.
-        tmp = dst.with_name(dst.name + ".tmp")
-        tifffile.imwrite(tmp, oriented, compression="zlib")
-        os.replace(tmp, dst)
-
     staging_dir.mkdir(parents=True, exist_ok=True)
     built: set[Path] = set()
     for cidx, store in enumerate(channel_zarr_paths):
@@ -778,12 +765,12 @@ def build_decon_staging_dir(
         if arr.ndim == 3:
             dst = staging_dir / single_name
             built.add(dst)
-            _write_staged(arr, dst)
+            write_decon_staged_tiff(arr, dst)
             continue
         if arr.shape[0] == 1:
             dst = staging_dir / single_name
             built.add(dst)
-            _write_staged(arr[0], dst)
+            write_decon_staged_tiff(arr[0], dst)
             continue
 
         n_t = arr.shape[0] if max_timepoints is None else min(arr.shape[0], max_timepoints)
@@ -797,7 +784,7 @@ def build_decon_staging_dir(
                 continue
             dst = staging_dir / f"{prefix}_C{cidx}_T{t:03d}.tif"
             built.add(dst)
-            _write_staged(arr[t], dst)
+            write_decon_staged_tiff(arr[t], dst)
 
     # Same stale-output hazard the mirror guards against: a staging dir built
     # when more timepoints existed would leave frames that still match

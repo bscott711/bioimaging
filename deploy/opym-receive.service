@@ -1,0 +1,21 @@
+[Unit]
+Description=opym-receive: real-time frame-streaming ingress (opym.stream)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+# MUST match opym-backfill.service's own `--decon-psf` flag (which sets
+# this same env var in-process -- see run_backfill_cli.py -- but only for
+# ITS OWN process; opym-receive is a separate service and does not inherit
+# it). If the two ever disagree, the receiver's pre-staged decon_stage/
+# TIFFs and the batch pass's decon-vs-deskew-only decision will disagree
+# too -- see opym.stream.receiver's module docstring. Leave unset (or
+# empty) to match a deskew-only backfill (no --decon-psf).
+Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+ExecStart=%h/.local/bin/uv run opym-receive
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
