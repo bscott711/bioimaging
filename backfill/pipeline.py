@@ -39,16 +39,29 @@ from psf_tools.extraction_plan import get_extraction_plan
 from backfill.mip_movie import encode_poster_image, normalize_for_video
 
 # Deconvolution settings, fixed here rather than left to PetaKit5D's defaults.
-# Both defaults are wrong for this data and both fail quietly:
-#   * wienerAlpha defaults to 0.005, which is visibly over-sharpened on these
-#     volumes. 0.02 is the value the decon-order comparison was run and judged at.
+# All four fail quietly if left to PetaKit5D's own defaults:
+#   * wienerAlpha defaults to 0.005, visibly over-sharpened on these volumes.
+#     0.02 was the decon-order comparison's value; a low-SNR-focused 22-variant
+#     then 20-variant refinement sweep on Cell_005 (see README.md's "Decon
+#     parameter tuning" section for the two review artifacts) picked 0.20,
+#     paired with the hann/damp changes below -- alone, higher alpha only
+#     marginally helped.
+#   * hannWinBounds defaults to [0.8, 1.0]; lowering the lower bound to 0.4
+#     (more apodization) is one of the three knobs the sweep's winning
+#     "super4" combination changed together.
+#   * dampFactor defaults to 1 (off, decon_lucy_omw_function.m); 2 caps a
+#     decon value's departure from its own input by 2x -- the direct remedy
+#     for isolated over-sharpened voxel spikes the sweep was counting.
 #   * edgeErosion defaults to 0, which leaves a bright ringing stripe along the
 #     slab boundary -- RLdecon.m applies `edgetaper` per z-PLANE, so the axial
 #     faces are never tapered and the FFT wraps there. Eroding 3 voxels removes
-#     it, for ~6% of the imaged slab.
-# Changing either of these changes what the output looks like, so they belong
+#     it, for ~6% of the imaged slab. Unchanged by the sweep above.
+# Changing any of these changes what the output looks like, so they belong
 # in the ticket (and therefore the log) rather than in a MATLAB default.
-DECON_WIENER_ALPHA = 0.02
+DECON_WIENER_ALPHA = 0.20
+DECON_OTF_CUM_THRESH = 0.90  # unchanged from the old default; the sweep's super4 kept it
+DECON_HANN_WIN_BOUNDS = [0.4, 1.0]
+DECON_DAMP_FACTOR = 2
 DECON_EDGE_EROSION = 3
 
 
@@ -608,6 +621,9 @@ def submit_deskew_ticket(
         dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
         wiener_alpha=DECON_WIENER_ALPHA,
+        otf_cum_thresh=DECON_OTF_CUM_THRESH,
+        hann_win_bounds=DECON_HANN_WIN_BOUNDS,
+        damp_factor=DECON_DAMP_FACTOR,
         edge_erosion=DECON_EDGE_EROSION,
         # Without this the ticket carries gpu_decon:false and PetaKit5D runs
         # the RL iterations on CPU -- both cards sit at 0% while the parfor
@@ -617,6 +633,7 @@ def submit_deskew_ticket(
         save_mip=True,
     )
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
+    registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
     return ticket_path
 
@@ -929,19 +946,42 @@ def dsr_output_dir(data_dir: Path, psf: Path | None) -> Path:
     return base / dsr_dir_name_for(psf)
 
 
+def decon_params_fingerprint() -> str:
+    """A short, deterministic fingerprint of the OMW knobs currently in
+    effect (the DECON_* constants above). `decon_provenance_matches` compares
+    this against what a dataset's on-disk output was actually produced with,
+    so a parameter retune -- not just a PSF swap -- is visible too. Confirmed
+    real gap: locking in `super4` (same PSF file, new alpha/hann/damp) was
+    otherwise indistinguishable from a no-op to every already-deskewed
+    dataset, since `decon_provenance_matches` used to compare only the PSF
+    path.
+    """
+    return (
+        f"a{DECON_WIENER_ALPHA}_o{DECON_OTF_CUM_THRESH}_"
+        f"h{DECON_HANN_WIN_BOUNDS[0]}-{DECON_HANN_WIN_BOUNDS[1]}_d{DECON_DAMP_FACTOR}"
+    )
+
+
 def decon_provenance_matches(registry, dataset_key: str, psf: Path | None) -> bool:
-    """True when the output already on disk was made with the PSF we are about
+    """True when the output already on disk was made with both the PSF AND
+    the OMW parameter settings (see `decon_params_fingerprint`) we are about
     to use.
 
     `is_stage_done(..., "deskew")` alone is not enough to skip a dataset: a
-    stage is only "done" for the PSF it was done WITH. Switching decon on for a
-    corpus that was deskewed without it -- or changing PSF -- otherwise looks
-    like a no-op, because every dataset reports itself already complete and
-    nothing recomputes. That is the same silent-skip failure mode as
-    PetaKit5D's own `if exist(deconFullpath,'file')`.
+    stage is only "done" for the PSF *and settings* it was done WITH.
+    Switching decon on for a corpus that was deskewed without it, changing
+    PSF, or retuning alpha/OTFCumThresh/hann/damp while keeping the same PSF
+    file, otherwise all look like a no-op, because every dataset reports
+    itself already complete and nothing recomputes. That is the same
+    silent-skip failure mode as PetaKit5D's own `if exist(deconFullpath,
+    'file')`.
     """
-    recorded = registry.get_decon_psf(dataset_key)
-    return recorded == (str(psf) if psf else None)
+    recorded_psf = registry.get_decon_psf(dataset_key)
+    if recorded_psf != (str(psf) if psf else None):
+        return False
+    if psf is None:
+        return True  # deskew-only: no OMW parameters were ever in play
+    return registry.get_decon_params(dataset_key) == decon_params_fingerprint()
 
 
 def zarr_deskew_data_dir(ds: LeafDataset, psf: Path | None) -> Path:
@@ -1231,6 +1271,9 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
         wiener_alpha=DECON_WIENER_ALPHA,
+        otf_cum_thresh=DECON_OTF_CUM_THRESH,
+        hann_win_bounds=DECON_HANN_WIN_BOUNDS,
+        damp_factor=DECON_DAMP_FACTOR,
         edge_erosion=DECON_EDGE_EROSION,
         # Without this the ticket carries gpu_decon:false and PetaKit5D runs
         # the RL iterations on CPU -- both cards sit at 0% while the parfor
@@ -1241,6 +1284,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         zarr_input=decon_psf is None,
     )
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
+    registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
     return ticket_path
 

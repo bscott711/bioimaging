@@ -66,6 +66,32 @@ Then run that `open "..."` command inside ChimeraX yourself, after fixing
 voxel size if needed (`volume #N voxelSize <x>,<y>,<z>`) — the wrapper's
 pixel calibration for X/Y is a placeholder.
 
+## Decon parameter tuning
+
+Production's OMW deconvolution parameters (`DECON_WIENER_ALPHA`,
+`DECON_OTF_CUM_THRESH`, `DECON_HANN_WIN_BOUNDS`, `DECON_DAMP_FACTOR` in
+`backfill/pipeline.py`) were picked by eye on a genuinely low-SNR cell
+(Cell_005, `20260917-SVO-memNG-mScar2xFYVE-FLM-Macropinocytosis`), not left at
+PetaKit5D's defaults. The two interactive comparison artifacts below are the
+record of that decision — every variant's images, per-plane Z-scrub, and
+noise/spike metrics, side by side against the raw (no-decon) data:
+
+- **[Decon Sweep Bench](https://claude.ai/artifact/GxW3QbewXrxxZxgtHLPdiP)** —
+  the original 22-variant sweep (α ladder, OTF threshold, Hann window,
+  iterations, damp factor, plain-RL reference) that first identified which
+  knobs mattered.
+- **[Decon Sweep Refinement](https://claude.ai/artifact/4yjCDqqvSugN7t7aGitPdn)** —
+  the follow-up sweep combining the first round's picks into single
+  "super" variants. **`super4`** (wienerAlpha 0.20, OTFCumThresh 0.90,
+  hannWinBounds [0.4, 1.0], dampFactor 2) is the current production default:
+  it cut spurious >12σ spike counts to roughly a third of what any single
+  changed knob achieved alone, at comparable brightness.
+
+Changing any of these values changes what every future decon run looks like
+across the whole backfill, so treat a change to them the same way this one
+was made: compare on real (ideally low-SNR) data in an artifact like these
+before merging, not just by reading numbers.
+
 ## Repo layout
 
 - `run_pipeline_cli.py`, `run_napari_opym.py`, `run_backfill_cli.py` — entry points
