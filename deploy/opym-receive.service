@@ -13,6 +13,15 @@ WorkingDirectory=%h/projects/bioimaging
 # too -- see opym.stream.receiver's module docstring. Leave unset (or
 # empty) to match a deskew-only backfill (no --decon-psf).
 Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# RAM-disk staging (opt-in, unset = write straight to each session's
+# declared raw_root on GPFS, today's original behavior). Set so PetaKit5D's
+# deskew/decon reads with zero GPFS latency -- see
+# opym.stream.receiver's module docstring and opym.stream.drain. A
+# background DrainPool copies each completed session to GPFS, verified
+# byte-for-byte, so GPFS stays the durable system of record; tmpfs is
+# volatile and only ever a staging copy of what a session already landed
+# on GPFS via this drain.
+Environment=OPYM_STREAM_STAGE_ROOT=/dev/shm/opym_stream_stage
 ExecStart=%h/.local/bin/uv run opym-receive
 Restart=on-failure
 RestartSec=10
