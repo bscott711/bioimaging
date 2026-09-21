@@ -24,6 +24,7 @@ import zarr
 from opym.discovery import KIND_ZARR_PRECROPPED
 from backfill.pipeline import (
     build_decon_staging_dir,
+    build_zarr_pyramid_mirror,
     dsr_dir_name_for,
     dsr_output_dir,
     resolve_decon_psf,
@@ -153,6 +154,48 @@ def test_declared_but_unwritten_timepoints_are_skipped(tmp_path):
 
     out = build_decon_staging_dir((store,), tmp_path / "decon_stage", dataset_prefix="ab")
     assert sorted(p.name for p in out.glob("*.tif")) == ["ab_C0_T000.tif", "ab_C0_T001.tif"]
+
+
+def test_only_one_real_timepoint_uses_single_timepoint_naming(tmp_path):
+    """Regression for a real failure (`.../20260710-YG_PSF/bead_004`): a
+    store DECLARES more than one timepoint but only ever wrote one real
+    chunk (an acquisition aborted after its very first timepoint). The
+    naming decision here must agree with `dataset_timepoints()` (which
+    counts real chunks the same way and returns 1 for this store), or the
+    caller submits a deskew ticket with the single-timepoint
+    `channel_patterns` (`<name>.ome`) while this function actually staged
+    `<prefix>_C0_T000.tif` -- a pattern mismatch that made PetaKit5D's
+    `getImageSize('')` die with "Index exceeds array bounds" on the real
+    dataset. `test_max_timepoints_caps_the_stage` above is the opposite
+    case (genuinely multi-timepoint, just capped for a fast test run) and
+    must keep multi-style naming -- this asserts the two are told apart by
+    the real written-chunk count, not by whichever count happens to be
+    small.
+    """
+    data = np.ones((2, 7, 5, 11), dtype=np.uint16)
+    store = _make_4d_store(tmp_path / "bead_004_GFP_488.ome.zarr", data)
+    import shutil
+
+    shutil.rmtree(store / "p0" / "1")  # only T000 was ever really written
+
+    out = build_decon_staging_dir((store,), tmp_path / "decon_stage", dataset_prefix="bead_004")
+    assert [p.name for p in out.glob("*.tif")] == ["bead_004_GFP_488.ome.tif"]
+
+
+def test_zarr_mirror_only_one_real_timepoint_uses_single_timepoint_naming(tmp_path):
+    """`build_zarr_pyramid_mirror` (the deskew-only, non-decon counterpart)
+    has the identical naming decision and the identical bug potential --
+    same fix, same reasoning as
+    `test_only_one_real_timepoint_uses_single_timepoint_naming` above.
+    """
+    data = np.ones((2, 7, 5, 11), dtype=np.uint16)
+    store = _make_4d_store(tmp_path / "bead_004_GFP_488.ome.zarr", data)
+    import shutil
+
+    shutil.rmtree(store / "p0" / "1")
+
+    out = build_zarr_pyramid_mirror((store,), tmp_path / "zarr_mirror", dataset_prefix="bead_004")
+    assert [p.name for p in out.iterdir()] == ["bead_004_GFP_488.ome.zarr"]
 
 
 def test_single_timepoint_keeps_the_ome_bearing_store_name(tmp_path):

@@ -24,7 +24,7 @@ from pathlib import Path
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
-from opym.utils import sanitize_filename
+from opym.utils import resolve_output_base, sanitize_filename
 
 from backfill.mip_movie import (
     build_mip_movies_for_dataset,
@@ -191,7 +191,7 @@ def _reap_decon_intermediates(ds: LeafDataset) -> None:
     decon_dir = data_dir / "Decon"
     psfgen = decon_dir / "psfgen"
     if psfgen.is_dir():
-        qc_dir = ds.leaf_dir / "decon_qc"
+        qc_dir = resolve_output_base(ds.leaf_dir) / "decon_qc"
         try:
             if qc_dir.exists():
                 shutil.rmtree(qc_dir)
@@ -234,7 +234,7 @@ def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
     try:
         labels = [channel_label(p.name) for p in ds.channel_zarr_paths] if ds.channel_zarr_paths else None
         summary = export_for_viewers(
-            dsr_dir, ds.leaf_dir / "viewer",
+            dsr_dir, resolve_output_base(ds.leaf_dir) / "viewer",
             name=ds.leaf_dir.name, channel_labels=labels,
         )
         print(f"[backfill] {ds.dataset_key}: viewer export -- {summary['frames']} frame(s), "
@@ -247,7 +247,10 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
     dsr_dir = _dsr_dir_for(ds)
     registry.start_stage(ds.dataset_key, "mip_encode")
     try:
-        movies_dir = ds.leaf_dir / "mip_movies"
+        # Same mirror-aware base pipeline.py's triage preview uses, so both
+        # writers of "mip_movies" for this dataset always agree on where it
+        # lives regardless of which one ran first.
+        movies_dir = resolve_output_base(ds.leaf_dir) / "mip_movies"
         if ds.kind == KIND_ZARR_PRECROPPED and dataset_timepoints(ds) > 1:
             # Time series: the mirror was exploded to per-timepoint frames
             # named `<prefix>_C<c>_T<ttt>.zarr` (see build_zarr_pyramid_mirror),

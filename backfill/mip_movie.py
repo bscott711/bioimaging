@@ -65,9 +65,38 @@ def find_mip_files(mips_dir: Path) -> dict[int, list[tuple[int, Path]]]:
 
 def load_channel_stack(files: list[tuple[int, Path]]) -> np.ndarray:
     """(T, Y, X) stack -- these MIP files are already 2D (PetaKit5D did the
-    Z-max), so no further projection is needed here."""
-    frames = [tifffile.imread(p) for _t, p in files]
-    return np.stack(frames, axis=0)
+    Z-max), so no further projection is needed here.
+
+    Drops any frame whose shape doesn't match the MODAL (most common) shape
+    across this channel's files, rather than letting `np.stack` raise.
+    Confirmed real cause: a MIP left over from a run predating a later
+    deskew-geometry fix (a different crop/rotation output size) sitting
+    alongside a full run of correctly-sized frames from the CURRENT
+    geometry -- one stale file from an old run shouldn't crash `mip_encode`
+    for a dataset that otherwise processed cleanly. The stale file is also
+    removed from disk (mirroring `_clean_stale_deskew_output`'s "clear
+    before regenerating" pattern) so it doesn't need re-detecting -- and
+    re-warning about -- on every later pass; it's redundant, superseded
+    data, not something worth keeping around.
+    """
+    loaded = [(p, tifffile.imread(p)) for _t, p in files]
+    shape_counts: dict[tuple[int, ...], int] = {}
+    for _p, frame in loaded:
+        shape_counts[frame.shape] = shape_counts.get(frame.shape, 0) + 1
+    modal_shape = max(shape_counts, key=shape_counts.get)
+
+    kept = []
+    for p, frame in loaded:
+        if frame.shape == modal_shape:
+            kept.append(frame)
+            continue
+        print(
+            f"[mip_movie] dropping stale MIP frame {p.name} (shape {frame.shape} "
+            f"!= this channel's modal shape {modal_shape}, likely left over from "
+            "a run with different crop/deskew geometry)"
+        )
+        p.unlink(missing_ok=True)
+    return np.stack(kept, axis=0)
 
 
 def normalize_for_video(
@@ -181,6 +210,29 @@ def build_poster_for_zarr_dataset(
     return encode_poster_image(blended_u8, out_path)
 
 
+def write_composite(
+    normalized_stacks: dict[int, np.ndarray], composite_path: Path, fps: float = 12.0
+) -> list[Path]:
+    """Writes the composite movie + its frame-0 poster from already
+    per-channel-normalized uint8 stacks (see `normalize_for_video`). Split
+    out of `build_mip_movies_for_dataset` so a color-only re-blend (see
+    `scripts/reblend_composites.py`) can regenerate just these two files
+    from the source MIP TIFFs, without re-encoding the untouched
+    per-channel movies.
+    """
+    written = [encode_composite_movie(normalized_stacks, composite_path, fps=fps)]
+    # Recompute frame 0 of the composite blend for its poster (cheap --
+    # one frame -- rather than threading it back out of
+    # encode_composite_movie's internals).
+    first_frame = np.zeros((*normalized_stacks[next(iter(normalized_stacks))].shape[1:], 3), dtype=np.float32)
+    for i, c in enumerate(sorted(normalized_stacks)):
+        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        first_frame += (normalized_stacks[c][0].astype(np.float32) / 255.0)[..., None] * color
+    first_frame_u8 = (np.clip(first_frame, 0, 1.0) * 255.0).astype(np.uint8)
+    written.append(encode_poster_image(first_frame_u8, composite_path.with_suffix(".jpg")))
+    return written
+
+
 def build_mip_movies_for_dataset(
     dsr_dir: Path, sanitized_name: str, out_dir: Path, fps: float = 12.0
 ) -> list[Path]:
@@ -208,15 +260,6 @@ def build_mip_movies_for_dataset(
 
     if len(normalized_stacks) > 1:
         composite_path = out_dir / f"{sanitized_name}_composite.webm"
-        written.append(encode_composite_movie(normalized_stacks, composite_path, fps=fps))
-        # Recompute frame 0 of the composite blend for its poster (cheap --
-        # one frame -- rather than threading it back out of
-        # encode_composite_movie's internals).
-        first_frame = np.zeros((*normalized_stacks[next(iter(normalized_stacks))].shape[1:], 3), dtype=np.float32)
-        for i, c in enumerate(sorted(normalized_stacks)):
-            color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
-            first_frame += (normalized_stacks[c][0].astype(np.float32) / 255.0)[..., None] * color
-        first_frame_u8 = (np.clip(first_frame, 0, 1.0) * 255.0).astype(np.uint8)
-        written.append(encode_poster_image(first_frame_u8, composite_path.with_suffix(".jpg")))
+        written.extend(write_composite(normalized_stacks, composite_path, fps=fps))
 
     return written

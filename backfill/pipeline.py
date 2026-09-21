@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 import tifffile
@@ -23,11 +25,12 @@ from opym.core import run_processing_job
 from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
-from opym.registry import StatusRegistry
+from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
     OutputFormat,
     derive_paths,
+    resolve_output_base,
     scan_channel_patterns,
     write_decon_staged_tiff,
 )
@@ -55,6 +58,17 @@ class DatasetProcessingError(Exception):
     orchestrator -- never allowed to abort the rest of the backfill."""
 
 
+class DeadDatasetError(Exception):
+    """Raised when a Micro-Manager series' own master/base file -- not just
+    a sibling continuation file -- has a corrupt (zero) TIFF header.
+    tifffile's MMStack discovery always starts from the file it was asked
+    to open, so there is no valid entry point to recover from; distinct
+    from a plain read error so callers mark the dataset 'dead' (permanently
+    unreadable) rather than 'corrupt' (recovery attempted, still failed) or
+    a transient failure worth retrying.
+    """
+
+
 def _output_looks_present(path: Path) -> bool:
     """Cheap filesystem sanity check backing the registry's "done" status --
     protects against the registry saying done after someone manually deleted
@@ -63,6 +77,166 @@ def _output_looks_present(path: Path) -> bool:
     the common failure mode without adding real cost to every dataset.
     """
     return path.is_dir() and any(path.iterdir())
+
+
+# Classic TIFF and BigTIFF magic numbers, both byte orders -- what a valid
+# header actually starts with, regardless of what specific TIFF flavor a
+# given acquisition file is.
+_TIFF_MAGIC_BYTES = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def _has_valid_tiff_header(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) in _TIFF_MAGIC_BYTES
+    except OSError:
+        return False
+
+
+_SEQUENCE_SUFFIX_RE = re.compile(r"_(\d+)(?:\.ome)?\.tif$")
+
+
+def _sequence_index(p: Path) -> int:
+    """Where `p` falls in Micro-Manager's own rollover naming: the base
+    file (`..._MMStack_Pos0.ome.tif`, no trailing `_N`) is 0, then
+    `..._1.ome.tif`, `..._2.ome.tif`, ... in NUMERIC order. Plain
+    lexicographic sorting would put `_10` before `_2`, which matters here:
+    `resolve_readable_master` below walks this order to find the first
+    corrupt file, so getting it wrong could silently include a file from
+    past a real break as if it came before it.
+    """
+    m = _SEQUENCE_SUFFIX_RE.search(p.name)
+    return int(m.group(1)) if m else 0
+
+
+def _mmstack_sequence(master_file: Path) -> list[Path]:
+    """Every file tifffile's own MMStack multi-file series discovery would
+    consider part of the same acquisition as `master_file` -- the identical
+    `<prefix>_MMStack*.tif` glob tifffile's `_series_mmstack` uses internally
+    (`prefix = filename.split('_MMStack')[0]`), so this always agrees with
+    what tifffile itself would try to open -- in true acquisition order (see
+    `_sequence_index`), not the glob's arbitrary order. Not a Micro-Manager
+    multi-file series at all (no `_MMStack` in the name) -> just the file
+    itself.
+    """
+    if "_MMStack" not in master_file.name:
+        return [master_file]
+    prefix = master_file.name.split("_MMStack")[0]
+    siblings = master_file.parent.glob(f"{prefix}_MMStack*.tif")
+    return sorted(siblings, key=_sequence_index)
+
+
+@dataclass(frozen=True)
+class ReadableMaster:
+    path: Path
+    # None: nothing was excluded, trust the declared (T, Z, C, Y, X) shape.
+    # An int: this many REAL (fully-written) timepoints were recovered --
+    # fewer than the declared shape, which is zero-padded past this point.
+    actual_timepoints: int | None
+    excluded: tuple[Path, ...]
+
+
+def resolve_readable_master(master_file: Path) -> ReadableMaster:
+    """Confirmed real failure mode: a crashed Micro-Manager acquisition can
+    leave one or more `*_MMStack_Pos0_N.ome.tif` sibling files with an
+    all-zero header (either a trailing file that was created but never
+    written, or a write that was truncated mid-flush) -- `tifffile` refuses
+    to open the WHOLE multi-file series when ANY sibling fails its own TIFF
+    magic check, even though the other siblings are perfectly good and
+    hold real data.
+
+    Builds a one-time, persistent mirror directory (hardlinked when
+    possible -- same inode, instant, no extra disk use; a real copy only
+    when that's not possible, e.g. across a filesystem boundary) containing
+    just the valid siblings under the same name, so ordinary
+    `tifffile.imread()`/`TiffFile()` -- unmodified, no special-casing
+    anywhere else in this codebase -- sees a complete, uncorrupted series
+    and applies its own normal multi-file logic. The corrupt file(s) are
+    simply never linked into that directory, so tifffile's own glob never
+    finds them; nothing here parses or reconstructs TIFF internals, which
+    keeps this robust to corruption anywhere in the sequence (not just a
+    trailing run) without having to reimplement tifffile's MMStack IFD
+    stitching.
+
+    Returns the ORIGINAL `master_file` unchanged (`actual_timepoints=None`)
+    when every sibling already has a valid header -- the overwhelming
+    common case, at the cost of one cheap 4-byte read per sibling.
+
+    "Prefix" is enforced literally: this walks the sequence in acquisition
+    order (`_mmstack_sequence`) and keeps only the leading run of good
+    files, stopping at the FIRST corrupt one. A real dataset (`hDF_cell2`)
+    confirmed this matters -- files `_4..._6` were corrupt but `_7..._10`
+    afterward had perfectly valid headers. Micro-Manager rolls a long
+    acquisition to a new file every ~4GB as it runs, so those later frames
+    are NOT contiguous with the ones before the break; including them
+    anyway would silently splice two separated time ranges together as if
+    they were adjacent, which no caller here expects (`actual_timepoints`
+    is used as a straight `[:N]` cap in `process_dataset`). Any good file
+    after the first bad one is therefore excluded too, along with the bad
+    one(s) -- less data recovered than a "keep every readable file" pass
+    would manage, but never wrong about which timepoints are contiguous.
+
+    Raises `DeadDatasetError` when `master_file` ITSELF is the corrupt one:
+    tifffile's MMStack discovery always starts from the file it was asked
+    to open, so there is no valid file to point it at instead.
+    """
+    sequence = _mmstack_sequence(master_file)
+
+    good: list[Path] = []
+    for p in sequence:
+        if not _has_valid_tiff_header(p):
+            break
+        good.append(p)
+    excluded = tuple(p for p in sequence if p not in good)
+
+    if not excluded:
+        return ReadableMaster(master_file, None, ())
+    if not good or good[0] != master_file:
+        raise DeadDatasetError(
+            f"master file itself has a corrupt/zero TIFF header: {master_file}"
+        )
+
+    repair_dir = resolve_output_base(master_file.parent) / "_mmstack_valid_prefix"
+    repair_dir.mkdir(parents=True, exist_ok=True)
+    mirror_master = repair_dir / master_file.name
+    for p in good:
+        dest = repair_dir / p.name
+        if dest.exists():
+            continue
+        try:
+            os.link(p, dest)
+        except OSError:
+            # Cross-filesystem (raw data and the mirror root can be on
+            # different mounts -- see resolve_output_base) or some other
+            # reason hardlinking isn't possible here; a real copy is more
+            # expensive but always works and only ever runs once per
+            # dataset (the `dest.exists()` check above skips it on every
+            # later pass).
+            shutil.copy2(p, dest)
+
+    # Count REAL (fully-written) timepoints from the valid files' own page
+    # counts, independent of tifffile's own zero-fill behavior for a
+    # missing MMStack file -- robust to the corrupt file(s) being anywhere
+    # in the sequence, not just a trailing run.
+    real_pages = 0
+    for p in good:
+        with tifffile.TiffFile(p) as tf:
+            real_pages += len(tf.pages)
+
+    actual_timepoints = None
+    with tifffile.TiffFile(mirror_master) as tf:
+        shape = tf.series[0].shape
+    if len(shape) == 5:  # (T, Z, C, Y, X) -- a genuine multi-timepoint series
+        per_timepoint_pages = 1
+        for s in shape[1:-2]:  # every axis between T and the trailing (Y, X)
+            per_timepoint_pages *= s
+        if per_timepoint_pages:
+            # Floor division: a final timepoint with fewer pages than a
+            # full Z*C (partially written before the crash) is
+            # conservatively excluded rather than counted as complete.
+            actual_timepoints = real_pages // per_timepoint_pages
+
+    return ReadableMaster(mirror_master, actual_timepoints, excluded)
 
 
 def _open_lazy_zarr(master_file: Path) -> zarr.Array:
@@ -184,14 +358,29 @@ def detect_rois(
     were slow/heavy enough (a full-stack projection, see
     `compute_reference_projection`) to occupy the entire worker pool and
     starve real pending datasets.
+
+    Also skips a dataset already known 'dead' or 'corrupt' when the raw
+    master file's (size, mtime) fingerprint hasn't changed since that
+    triage was recorded: without this, a permanently unreadable raw file
+    (a crashed acquisition with no recoverable data, or a bad IFD tag deep
+    in the file that `resolve_readable_master` can't repair) gets re-read
+    over NFS and re-fails IDENTICALLY on every single --watch pass forever.
+    A re-upload/repair changes the fingerprint and is retried normally.
     """
     if registry.is_stage_done(ds.dataset_key, "mip_encode"):
         return None, None, "unknown"
 
+    existing = registry.get_dataset(ds.dataset_key)
+    if existing and existing.get("signal_flag") in ("dead", "corrupt"):
+        current_fp = master_file_fingerprint(ds.master_file)
+        if current_fp is not None and current_fp == existing.get("master_file_fingerprint"):
+            return None, None, existing["signal_flag"]
+
     registry.start_stage(ds.dataset_key, "roi_detect")
     try:
-        z = _open_lazy_zarr(ds.master_file)
-        master_roi_path = ds.leaf_dir / "master_roi.json"
+        readable = resolve_readable_master(ds.master_file)
+        z = _open_lazy_zarr(readable.path)
+        master_roi_path = resolve_output_base(ds.leaf_dir) / "master_roi.json"
         # z.shape[0] is only the T axis for a genuine 5D (T,C,Z,Y,X)/
         # (T,Z,C,Y,X) array. A dataset with just one real timepoint arrives
         # here already squeezed to 4D (Z,C,Y,X) -- passing timepoint=None
@@ -206,8 +395,15 @@ def detect_rois(
         signal_flag = "ok" if (top_roi is not None or bot_roi is not None) else "dud"
         if signal_flag == "dud":
             top_roi, bot_roi = _fallback_centered_rois(max_proj.shape)
+        if readable.excluded and signal_flag == "ok":
+            # Real data, just fewer timepoints than configured -- distinct
+            # from 'dud' (readable, no signal at all) so the dashboard can
+            # tell "partial recovery" from "nothing here worth processing".
+            signal_flag = "partial"
 
         actual_timepoints = z.shape[0] if z.ndim >= 5 else 1
+        if readable.actual_timepoints is not None:
+            actual_timepoints = readable.actual_timepoints
         metadata_file = derive_paths(ds.master_file, OutputFormat.ZARR).metadata_file
         expected_timepoints = parse_expected_timepoints(metadata_file)
         registry.set_triage(
@@ -216,14 +412,37 @@ def detect_rois(
             expected_timepoints=expected_timepoints,
             actual_timepoints=actual_timepoints,
         )
-        _write_triage_preview(max_proj, ds.leaf_dir / "mip_movies" / "triage_preview.jpg")
+        if readable.excluded:
+            print(
+                f"[backfill] {ds.dataset_key}: excluded {len(readable.excluded)} corrupt "
+                f"MMStack file(s) ({', '.join(p.name for p in readable.excluded)}), "
+                f"recovered {actual_timepoints} real timepoint(s)"
+            )
+        _write_triage_preview(
+            max_proj, resolve_output_base(ds.leaf_dir) / "mip_movies" / "triage_preview.jpg"
+        )
 
         registry.finish_stage(ds.dataset_key, "roi_detect", status="done")
         return top_roi, bot_roi, signal_flag
+    except DeadDatasetError as e:
+        # set_signal_flag, not set_triage: this dataset may already have a
+        # real expected/actual_timepoints from an earlier successful pass
+        # (unlikely for a freshly-dead file, but not impossible -- e.g. a
+        # previously-fine file corrupted later) -- set_triage would
+        # silently null both out on every retry.
+        registry.set_signal_flag(ds.dataset_key, "dead")
+        registry.set_master_file_fingerprint(
+            ds.dataset_key, master_file_fingerprint(ds.master_file)
+        )
+        registry.finish_stage(ds.dataset_key, "roi_detect", status="failed", error=str(e))
+        raise
     except Exception as e:  # noqa: BLE001 - reported into the registry, then re-raised
         classification = _classify_unreadable_raw_file(e)
         if classification is not None:
-            registry.set_triage(ds.dataset_key, signal_flag=classification)
+            registry.set_signal_flag(ds.dataset_key, classification)
+            registry.set_master_file_fingerprint(
+                ds.dataset_key, master_file_fingerprint(ds.master_file)
+            )
         registry.finish_stage(ds.dataset_key, "roi_detect", status="failed", error=str(e))
         raise
 
@@ -245,12 +464,26 @@ def crop_and_convert(
     Both calls read the same lazy `aszarr()` view of the same raw file
     cropped to the same ROI, so the incremental cost of the second call is
     bounded by the (already-cropped) output size, not the full raw file.
+
+    Reads through `resolve_readable_master(ds.master_file)` rather than
+    `ds.master_file` directly, so a dataset with a corrupt MMStack sibling
+    (already repaired once by `detect_rois`) reads from that same repaired
+    mirror here too, capped to its real (non-zero-padded) timepoint count --
+    see `ReadableMaster`/`process_dataset`'s `max_timepoints`. OUTPUT paths
+    below stay derived from `ds.master_file` unchanged: the repaired mirror
+    lives in its own `_mmstack_valid_prefix/` directory, unrelated to where
+    this dataset's real output belongs.
     """
+    readable = resolve_readable_master(ds.master_file)
     extraction_plan = get_extraction_plan(ds.master_file)
     channels_to_output = _channels_to_output(extraction_plan)
 
-    zarr_out_dir = ds.leaf_dir / "processed_ngff"
-    tiff_out_dir = ds.leaf_dir / "processed_tiff_series_split"
+    # Derived through derive_paths(), not restated here, so this always
+    # agrees with wherever run_processing_job() (below) actually writes --
+    # including its fallback to a mirror location when ds.leaf_dir isn't
+    # writable (see resolve_output_base).
+    zarr_out_dir = derive_paths(ds.master_file, OutputFormat.ZARR).output_dir
+    tiff_out_dir = derive_paths(ds.master_file, OutputFormat.TIFF_SERIES).output_dir
 
     if registry.is_stage_done(ds.dataset_key, "crop_zarr") and _output_looks_present(zarr_out_dir):
         pass
@@ -264,7 +497,13 @@ def crop_and_convert(
                 output_format=OutputFormat.ZARR,
                 channels_to_output=channels_to_output,
                 rotate_90=True,
-                cli_log_file=ds.leaf_dir / "opm_roi_log.json",
+                # zarr_out_dir.parent is output_base (resolve_output_base's
+                # result) -- keep this log beside the actual output, not
+                # necessarily ds.leaf_dir, for the same reason zarr_out_dir
+                # itself was moved off derive_paths' old hand-rolled form.
+                cli_log_file=zarr_out_dir.parent / "opm_roi_log.json",
+                read_file=readable.path,
+                max_timepoints=readable.actual_timepoints,
             )
             registry.finish_stage(
                 ds.dataset_key, "crop_zarr", status="done", output_path=str(zarr_out_dir)
@@ -285,7 +524,13 @@ def crop_and_convert(
                 output_format=OutputFormat.TIFF_SERIES,
                 channels_to_output=channels_to_output,
                 rotate_90=True,
-                cli_log_file=ds.leaf_dir / "opm_roi_log.json",
+                # zarr_out_dir.parent is output_base (resolve_output_base's
+                # result) -- keep this log beside the actual output, not
+                # necessarily ds.leaf_dir, for the same reason zarr_out_dir
+                # itself was moved off derive_paths' old hand-rolled form.
+                cli_log_file=zarr_out_dir.parent / "opm_roi_log.json",
+                read_file=readable.path,
+                max_timepoints=readable.actual_timepoints,
             )
             registry.finish_stage(
                 ds.dataset_key, "crop_tiff", status="done", output_path=str(tiff_out_dir)
@@ -563,7 +808,13 @@ def build_zarr_pyramid_mirror(
             _mirror_store_dir(mirror_dir / store.name, pixel_dir, pixel_dir / ".zarray")
             continue
 
-        if shape[0] == 1:
+        # Single-vs-multi naming is decided from `channel_store_timepoints`
+        # (REAL written chunk dirs), not the store's raw declared `shape[0]`
+        # and not the loop bound `n_t` below (which `max_timepoints` can
+        # clamp for an intentionally-fast test run on an otherwise-healthy
+        # store that must still get multi-style naming) -- see the
+        # identical fix (and its full docstring) in `build_decon_staging_dir`.
+        if channel_store_timepoints(store) <= 1:
             # Degenerate 4D (single real timepoint): still needs the same
             # leading-axis-stripped 3D view as the true time-series branch
             # below -- confirmed live that leaving `.zarray` as 4D
@@ -701,8 +952,13 @@ def zarr_deskew_data_dir(ds: LeafDataset, psf: Path | None) -> Path:
     share the mirror). PetaKit5D writes its DS/DSR/Decon output *inside*
     whichever of these is the `dataDir`, so `_dsr_dir_for` in
     `backfill/cli.py` must resolve through here too.
+
+    Resolved through `resolve_output_base()` like every other output path,
+    so a KIND_ZARR_PRECROPPED dataset under an unwritable raw dir gets its
+    staging dir mirrored too, rather than failing at mkdir the same way the
+    TIFF-path crop stage used to.
     """
-    return ds.leaf_dir / ("decon_stage" if psf else "zarr_mirror")
+    return resolve_output_base(ds.leaf_dir) / ("decon_stage" if psf else "zarr_mirror")
 
 
 def build_decon_staging_dir(
@@ -767,7 +1023,25 @@ def build_decon_staging_dir(
             built.add(dst)
             write_decon_staged_tiff(arr, dst)
             continue
-        if arr.shape[0] == 1:
+
+        # Decide single-vs-multi naming from `channel_store_timepoints`
+        # (REAL written chunk dirs) -- the same signal `dataset_timepoints()`
+        # uses, and NOT `arr.shape[0]` (the store's raw DECLARED length) or
+        # the loop bound `n_t` below (which `max_timepoints` can clamp for
+        # an intentionally-fast test run on an otherwise-healthy, genuinely
+        # multi-timepoint store -- that must still get multi-style naming,
+        # confirmed by test_max_timepoints_caps_the_stage).
+        #
+        # Confirmed real failure this fixes: an aborted acquisition whose
+        # store still DECLARES e.g. shape[0]=2 but only ever wrote 1 real
+        # timepoint's chunks (`channel_store_timepoints()` -> 1) took the
+        # multi-timepoint branch anyway (old check: `arr.shape[0] == 1`,
+        # false here), writing `<prefix>_C0_T000.tif` -- while the caller,
+        # going by `dataset_timepoints()`, submitted the ticket with the
+        # single-timepoint pattern `<name>.ome`, matching nothing on disk.
+        # PetaKit5D's `getImageSize('')` then died with "Index exceeds
+        # array bounds".
+        if channel_store_timepoints(store) <= 1:
             dst = staging_dir / single_name
             built.add(dst)
             write_decon_staged_tiff(arr[0], dst)
@@ -892,6 +1166,16 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
             "OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 to override)."
         )
         print(f"   [{ds.dataset_key}] SKIP -- {msg}")
+        # Distinct from a real failure: this is a deliberate guard, cheap to
+        # recheck (no multi-GB read, just zarr coordinate-array metadata),
+        # and self-heals the moment the data lands -- see SIGNAL_FLAGS'
+        # 'blocked' entry. The stage itself still has to record 'failed'
+        # (finish_stage only accepts 'done'/'failed'), so the dashboard
+        # separates it out via signal_flag, not stage status. set_signal_flag,
+        # not set_triage: this dataset already passed roi_detect (deskew is
+        # downstream of it), so it has a real expected/actual_timepoints
+        # from that pass -- set_triage would null both out on every retry.
+        registry.set_signal_flag(ds.dataset_key, "blocked")
         registry.finish_stage(ds.dataset_key, "deskew", status="failed", error=msg)
         return None
     print(f"   [{ds.dataset_key}] z step {z_step_um} um (from {z_step_source})")
@@ -1000,6 +1284,17 @@ def process_crop_and_submit(
     )
     try:
         top_roi, bot_roi, _signal_flag = detect_rois(ds, registry)
+        if top_roi is None and bot_roi is None:
+            # `detect_rois` returns this pair only as a "nothing more to do
+            # here" sentinel -- either the dataset is already fully done
+            # (mip_encode 'unknown' skip), or it's a known dead/corrupt raw
+            # file being sticky-skipped rather than re-read. A REAL result
+            # (even the 'dud' fallback) always has at least one real ROI.
+            # Calling crop_and_convert with (None, None) would reach
+            # run_processing_job's own ValueError -- true, but a misleading
+            # "crop_zarr failed" registry entry for what is really "roi_detect
+            # already explains this; nothing to crop."
+            return None
         _zarr_out_dir, tiff_out_dir = crop_and_convert(ds, top_roi, bot_roi, registry)
         return submit_deskew_ticket(ds, tiff_out_dir, registry)
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest of the run
