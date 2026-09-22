@@ -36,6 +36,7 @@ from backfill.pipeline import (
     dataset_timepoints,
     detect_rois,
     dsr_output_dir,
+    log_grandfathered_decon_datasets,
     process_crop_and_submit,
     process_zarr_precropped_dataset,
     resolve_decon_psf,
@@ -407,6 +408,11 @@ def run_backfill(
             master_file=str(ds.master_file),
             has_legacy_decon=legacy_flags[ds.dataset_key],
         )
+
+    # Say once per pass how many datasets the NULL-fingerprint grandfather
+    # clause is holding back, so "nothing happened" is distinguishable from
+    # "nothing needed to happen".
+    log_grandfathered_decon_datasets(registry, resolve_decon_psf())
 
     if discover_only:
         registry.close()

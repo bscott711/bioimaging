@@ -88,6 +88,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--reprocess-legacy-decon",
+        action="store_true",
+        help=(
+            "Also re-deconvolve datasets whose output predates decon-parameter "
+            "provenance (a NULL decon_params fingerprint). Off by default: those "
+            "were made with unknown -- in practice pre-super4 -- OMW settings, so "
+            "treating them as stale re-submits the entire legacy corpus at once. "
+            "Turn it on deliberately, when you mean to run that batch."
+        ),
+    )
+    parser.add_argument(
         "--watch",
         type=float,
         default=None,
@@ -112,6 +123,15 @@ def main():
         os.environ["OPYM_DECON_PSF"] = str(psf)
         print(f"[backfill] Deconvolution ENABLED with PSF {psf}")
         print("[backfill] Output -> DSR_decon/ (DSR_nodecon/ left untouched)")
+
+    # Same env-var rationale as --decon-psf above;
+    # backfill.pipeline.reprocess_legacy_decon() reads it.
+    if args.reprocess_legacy_decon:
+        os.environ["OPYM_DECON_REPROCESS_LEGACY"] = "1"
+        print(
+            "[backfill] Legacy (unknown-parameter) decon output WILL be "
+            "re-deconvolved with the current settings"
+        )
 
     if args.watch is not None:
         watch_backfill(

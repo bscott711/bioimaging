@@ -296,3 +296,298 @@ def test_reaper_keeps_the_dsr_output(tmp_path, monkeypatch):
     assert not (decon / "Cell_001_C0_T000.tif").exists(), "decon intermediate kept"
     assert not (stage / "Cell_001_C0_T000.tif").exists(), "staged input kept"
     assert (leaf / "decon_qc" / "psf_omw.tif").exists(), "psfgen QC not preserved"
+
+
+# --------------------------------------------------------------------------
+# Re-run safety: stale output must not survive a configuration change
+# --------------------------------------------------------------------------
+
+
+class _FakeRegistry:
+    """Only the four accessors the provenance/submit path actually touches."""
+
+    def __init__(self, rows=None):
+        self.rows = rows or {}
+        # The real `all_datasets()` selects * from datasets, so every row it
+        # returns carries its own key. Mirror that rather than making each
+        # test repeat it.
+        for key, row in self.rows.items():
+            row.setdefault("dataset_key", key)
+        self.started = []
+
+    def _row(self, key):
+        return self.rows.setdefault(key, {"dataset_key": key})
+
+    def get_stage(self, key, stage):
+        return self._row(key).get(f"stage:{stage}")
+
+    def is_stage_done(self, key, stage):
+        row = self.get_stage(key, stage)
+        return bool(row and row["status"] == "done")
+
+    def get_decon_psf(self, key):
+        return self._row(key).get("decon_psf")
+
+    def get_decon_params(self, key):
+        return self._row(key).get("decon_params")
+
+    def set_decon_psf(self, key, value):
+        self._row(key)["decon_psf"] = value
+
+    def set_decon_params(self, key, value):
+        self._row(key)["decon_params"] = value
+
+    def register_dataset(self, key, **kw):
+        self._row(key).update(kw)
+
+    def start_stage(self, key, stage, *, ticket_path=None):
+        self._row(key)[f"stage:{stage}"] = {"status": "running", "ticket_path": ticket_path}
+        self.started.append((key, stage))
+
+    def all_datasets(self):
+        return list(self.rows.values())
+
+
+def test_a_parameter_retune_clears_decon_output_from_the_previous_settings(
+    two_channel_store, monkeypatch, capsys
+):
+    """Regression for the 2026-09-21 failure.
+
+    Locking in the `super4` OMW parameters made `decon_provenance_matches`
+    (correctly) reject 13 already-`done` datasets, so they re-submitted. But
+    the stale-output cleanup was gated on `status == "failed"`, and these rows
+    were `done` -- so the previous run's `Decon/` stayed on disk. Two separate
+    ways that bites, both of which this asserts against:
+
+    * `Decon/Masks/<fsname>_eroded.zarr` survives the intermediate reaper, and
+      its existence sends XR_RLdeconFrame3D.m:244 into `rmdirs`, which is not a
+      function anywhere in the vendored PetaKit5D. All 13 died there.
+    * Even with that shimmed, PetaKit5D skips any decon frame whose output
+      already exists, so the old-alpha pixels would have been reused and then
+      stamped with the NEW provenance fingerprint -- silently wrong data
+      reporting itself correct.
+    """
+    from backfill import pipeline
+
+    stores, _volumes, tmp_path = two_channel_store
+    leaf = tmp_path
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    monkeypatch.setenv("OPYM_DECON_PSF", str(psf))
+    monkeypatch.setenv("OPYM_ZARR_DEFAULT_Z_STEP", "0.5")
+    monkeypatch.delenv("OPYM_DECON_REPROCESS_LEGACY", raising=False)
+
+    submitted = {}
+
+    def _fake_submit(**kw):
+        submitted.update(kw)
+        ticket = tmp_path / "ticket.json"
+        ticket.write_text("{}")
+        return ticket
+
+    monkeypatch.setattr(pipeline, "submit_remote_deskew_job", _fake_submit)
+
+    # Output from the PREVIOUS run, at the old parameters.
+    data_dir = tmp_path / "decon_stage"
+    decon = data_dir / "Decon"
+    (decon / "Masks").mkdir(parents=True)
+    (decon / "Masks" / "cell_001_C0_T000_eroded.zarr").mkdir()
+    (decon / "DSR_decon").mkdir()
+    (decon / "DSR_decon" / "cell_001_C0_T000.tif").write_bytes(b"old alpha=0.02 output")
+    (decon / "cell_001_C0_T000.tif").write_bytes(b"old decon intermediate")
+
+    ds = SimpleNamespace(
+        kind=KIND_ZARR_PRECROPPED,
+        leaf_dir=leaf,
+        raw_dir=leaf,
+        dataset_key="k",
+        master_file=leaf / "raw.ome.tif",
+        channel_zarr_paths=tuple(stores),
+    )
+    registry = _FakeRegistry(
+        {
+            "k": {
+                "dataset_key": "k",
+                "stage:deskew": {"status": "done", "ticket_path": "old.json"},
+                "decon_psf": str(psf.resolve()),
+                "decon_params": "a0.02_o0.9_h0.8-1.0_d1",  # the OLD settings
+            }
+        }
+    )
+
+    ticket = pipeline.submit_zarr_deskew_ticket(ds, registry)
+
+    assert ticket is not None, "a parameter change must re-submit, not skip"
+    assert not decon.exists(), (
+        "Decon/ from the previous parameter set survived -- the eroded mask "
+        "crashes the re-run in rmdirs, and any surviving decon frame is "
+        "silently reused instead of recomputed"
+    )
+    assert submitted["wiener_alpha"] == pipeline.DECON_WIENER_ALPHA
+    assert registry.get_decon_params("k") == pipeline.decon_params_fingerprint()
+
+
+def test_legacy_decon_output_is_grandfathered_unless_opted_in(monkeypatch, tmp_path):
+    """A NULL `decon_params` means "deconvolved before the fingerprint column
+    existed", not "made with the wrong settings we can prove".
+
+    Reading it as stale re-submits the entire legacy corpus (65 datasets as of
+    2026-09-21) the instant the backfill restarts. Held by default; opt in with
+    OPYM_DECON_REPROCESS_LEGACY=1.
+    """
+    from backfill import pipeline
+
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    registry = _FakeRegistry(
+        {
+            "legacy": {"decon_psf": str(psf), "decon_params": None},
+            "current": {"decon_psf": str(psf), "decon_params": pipeline.decon_params_fingerprint()},
+            "retuned": {"decon_psf": str(psf), "decon_params": "a0.02_o0.9_h0.8-1.0_d1"},
+            "other-psf": {"decon_psf": "/some/other.tif", "decon_params": None},
+        }
+    )
+
+    monkeypatch.delenv("OPYM_DECON_REPROCESS_LEGACY", raising=False)
+    assert pipeline.decon_provenance_matches(registry, "legacy", psf) is True
+    assert pipeline.decon_provenance_matches(registry, "current", psf) is True
+    assert pipeline.decon_provenance_matches(registry, "retuned", psf) is False, (
+        "a known, differing fingerprint is a real mismatch and must still re-run"
+    )
+    assert pipeline.decon_provenance_matches(registry, "other-psf", psf) is False, (
+        "grandfathering must not reach across a PSF change"
+    )
+
+    monkeypatch.setenv("OPYM_DECON_REPROCESS_LEGACY", "1")
+    assert pipeline.decon_provenance_matches(registry, "legacy", psf) is False
+    assert pipeline.decon_provenance_matches(registry, "current", psf) is True
+
+
+def test_grandfathered_datasets_are_reported_not_silent(monkeypatch, tmp_path, capsys):
+    """The whole point of the fingerprint was to stop a parameter change
+    looking like a no-op. Holding a cohort back reintroduces exactly that, so
+    it has to be said out loud once per pass.
+    """
+    from backfill import pipeline
+
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    done = {"status": "done", "ticket_path": "t.json"}
+    registry = _FakeRegistry(
+        {
+            "a": {"decon_psf": str(psf), "decon_params": None, "stage:deskew": done},
+            "b": {"decon_psf": str(psf), "decon_params": None, "stage:deskew": done},
+            "c": {
+                "decon_psf": str(psf),
+                "decon_params": pipeline.decon_params_fingerprint(),
+                "stage:deskew": done,
+            },
+            "d": {"decon_psf": None, "decon_params": None},  # never deconvolved
+            # NULL fingerprint but no finished deskew: nothing is being held
+            # back here, so counting it overstates the exemption (539 vs 65 on
+            # the real registry).
+            "e": {
+                "decon_psf": str(psf),
+                "decon_params": None,
+                "stage:deskew": {"status": "failed", "ticket_path": "t.json"},
+            },
+            "f": {"decon_psf": str(psf), "decon_params": None},  # no deskew row at all
+        }
+    )
+
+    monkeypatch.delenv("OPYM_DECON_REPROCESS_LEGACY", raising=False)
+    assert pipeline.log_grandfathered_decon_datasets(registry, psf) == 2
+    assert "2 dataset(s)" in capsys.readouterr().out
+
+    monkeypatch.setenv("OPYM_DECON_REPROCESS_LEGACY", "1")
+    assert pipeline.log_grandfathered_decon_datasets(registry, psf) == 0
+    assert pipeline.log_grandfathered_decon_datasets(registry, None) == 0
+
+
+def _tiff_dataset(tmp_path):
+    """A legacy OME-TIFF dataset whose crop stage already ran, so
+    `resolve_deskew_working_dir` resolves to the master-stem directory."""
+    leaf = tmp_path / "Cell_1"
+    leaf.mkdir()
+    master = leaf / "cell_MMStack_Pos0.ome.tif"
+    master.write_bytes(b"raw")
+    work = leaf / "cell_MMStack_Pos0"
+    work.mkdir()
+    (work / "cell_MMStack_Pos0_C0_T000.tif").write_bytes(b"cropped frame")
+    return (
+        SimpleNamespace(
+            kind="tiff",
+            leaf_dir=leaf,
+            raw_dir=leaf,
+            dataset_key="k",
+            master_file=master,
+            channel_zarr_paths=(),
+        ),
+        work,
+    )
+
+
+def test_tiff_path_does_not_delete_decon_output_it_never_created(tmp_path, monkeypatch):
+    """The crop stage's working dir is also where the older manual `opym` CLI
+    wrote its own `Decon/`. With no registry row there is nothing to say that
+    output came from this pipeline, so it is not ours to remove -- the
+    stale-output cleanup must stay out of a dataset the backfill has never
+    submitted for.
+    """
+    from backfill import pipeline
+
+    ds, work = _tiff_dataset(tmp_path)
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    monkeypatch.setenv("OPYM_DECON_PSF", str(psf))
+    monkeypatch.setattr(
+        pipeline, "submit_remote_deskew_job", lambda **kw: tmp_path / "ticket.json"
+    )
+    (tmp_path / "ticket.json").write_text("{}")
+
+    hand_run = work / "Decon"
+    hand_run.mkdir()
+    (hand_run / "precious.tif").write_bytes(b"hand-run result")
+
+    registry = _FakeRegistry({"k": {"dataset_key": "k"}})  # no deskew row at all
+    pipeline.submit_deskew_ticket(ds, work, registry)
+
+    assert (hand_run / "precious.tif").exists(), (
+        "deleted Decon/ output that this pipeline never produced"
+    )
+
+
+def test_tiff_path_clears_its_own_stale_output_on_a_retune(tmp_path, monkeypatch):
+    """Counterpart to the test above: once a registry row exists, the output
+    IS this pipeline's, and a provenance mismatch must clear it -- the same
+    `done`-row retune case that broke the zarr path on 2026-09-21.
+    """
+    from backfill import pipeline
+
+    ds, work = _tiff_dataset(tmp_path)
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    monkeypatch.setenv("OPYM_DECON_PSF", str(psf))
+    monkeypatch.setattr(
+        pipeline, "submit_remote_deskew_job", lambda **kw: tmp_path / "ticket.json"
+    )
+    (tmp_path / "ticket.json").write_text("{}")
+
+    stale = work / "Decon"
+    (stale / "Masks").mkdir(parents=True)
+    (stale / "Masks" / "cell_MMStack_Pos0_C0_T000_eroded.zarr").mkdir()
+    (stale / "old.tif").write_bytes(b"old alpha")
+
+    registry = _FakeRegistry(
+        {
+            "k": {
+                "dataset_key": "k",
+                "stage:deskew": {"status": "done", "ticket_path": "old.json"},
+                "decon_psf": str(psf.resolve()),
+                "decon_params": "a0.02_o0.9_h0.8-1.0_d1",
+            }
+        }
+    )
+    pipeline.submit_deskew_ticket(ds, work, registry)
+
+    assert not stale.exists(), "stale Decon/ survived a parameter retune"

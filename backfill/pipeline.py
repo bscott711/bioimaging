@@ -596,13 +596,23 @@ def submit_deskew_ticket(
         and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
     ):
         return Path(existing["ticket_path"])
-    if existing and existing["status"] == "failed":
+    # Past both early returns, so we are definitely submitting -- which means
+    # whatever is on disk was made by a *different* configuration than the one
+    # we are about to run (or by a run that crashed), and must not be left for
+    # PetaKit5D to reuse. See submit_zarr_deskew_ticket for the full reasoning;
+    # the gate used to be `status == "failed"`, which missed the case that
+    # actually broke production: a parameter retune re-submitting over `done`.
+    #
+    # Requires an existing row, unlike the zarr path. `work_dir` here is the
+    # crop stage's output dir, which is also where the older manual `opym` CLI
+    # wrote its own `Decon/` -- so with no row at all we cannot tell this
+    # pipeline's stale output from a hand-run result that predates it, and
+    # deleting the latter is not ours to do. A row means this pipeline has
+    # submitted for this dataset before and owns what is there.
+    if existing:
         try:
             work_dir = resolve_deskew_working_dir(ds.master_file)
             _clean_stale_deskew_output(dsr_output_dir(work_dir, decon_psf))
-            # See submit_zarr_deskew_ticket: PetaKit5D reuses an existing
-            # Decon frame rather than recomputing it, so a stale one (from a
-            # failed run, or a different PSF/alpha) must go.
             _clean_stale_deskew_output(work_dir / "Decon")
         except FileNotFoundError:
             pass
@@ -946,6 +956,54 @@ def dsr_output_dir(data_dir: Path, psf: Path | None) -> Path:
     return base / dsr_dir_name_for(psf)
 
 
+def reprocess_legacy_decon() -> bool:
+    """True when datasets deconvolved before the `decon_params` fingerprint
+    existed should be re-deconvolved with the current settings.
+
+    Off by default: `decon_provenance_matches` otherwise reads a NULL
+    fingerprint as "made with unknown, therefore wrong, parameters" and
+    re-submits every legacy dataset at once. Read from the environment rather
+    than threaded through as an argument for the same reason as
+    `resolve_decon_psf` -- the backfill fans datasets across a process pool
+    and an env var is inherited by every worker. `run_backfill_cli.py
+    --reprocess-legacy-decon` sets it.
+    """
+    return os.environ.get("OPYM_DECON_REPROCESS_LEGACY", "").strip() not in ("", "0")
+
+
+def log_grandfathered_decon_datasets(registry, psf: Path | None) -> int:
+    """Print how many datasets are being held back by the NULL-fingerprint
+    grandfather clause in `decon_provenance_matches`, and return the count.
+
+    Exists so the exemption is visible once per pass instead of silent: a
+    dataset that is skipped for a reason other than "already up to date" is
+    exactly the thing this module keeps getting bitten by.
+    """
+    if psf is None or reprocess_legacy_decon():
+        return 0
+    # Only datasets the clause actually SKIPS count. A NULL fingerprint on a
+    # dataset that never finished its deskew changes nothing -- it is not done,
+    # so it re-submits on provenance or not -- and counting those inflated this
+    # from the 65 datasets that really are being held to 539, which reads as a
+    # far bigger exemption than it is.
+    held = sum(
+        1
+        for d in registry.all_datasets()
+        if d.get("decon_psf")
+        and d.get("decon_params") is None
+        and registry.is_stage_done(d["dataset_key"], "deskew")
+    )
+    if held:
+        print(
+            f"[backfill] {held} dataset(s) already deconvolved with unknown "
+            "(pre-provenance) OMW settings are being left as-is -- their output "
+            "will NOT be recomputed with the current ones. Rerun with "
+            "--reprocess-legacy-decon (OPYM_DECON_REPROCESS_LEGACY=1) to "
+            "re-deconvolve them."
+        )
+    return held
+
+
 def decon_params_fingerprint() -> str:
     """A short, deterministic fingerprint of the OMW knobs currently in
     effect (the DECON_* constants above). `decon_provenance_matches` compares
@@ -981,7 +1039,25 @@ def decon_provenance_matches(registry, dataset_key: str, psf: Path | None) -> bo
         return False
     if psf is None:
         return True  # deskew-only: no OMW parameters were ever in play
-    return registry.get_decon_params(dataset_key) == decon_params_fingerprint()
+    recorded_params = registry.get_decon_params(dataset_key)
+    if recorded_params is None and not reprocess_legacy_decon():
+        # Grandfathered: this dataset was deconvolved before `decon_params`
+        # existed as a column, so we know the PSF matches but genuinely
+        # cannot tell which OMW knobs produced it -- in practice the
+        # pre-super4 settings (alpha 0.02). Treating "unknown" as "stale"
+        # queues the entire legacy corpus (65 datasets as of 2026-09-21) for
+        # re-deconvolution the instant the backfill restarts, which is a
+        # corpus-wide GPU run nobody asked for. Hold them until someone opts
+        # in deliberately and can batch it.
+        #
+        # Note this is exactly the silent-no-op this function exists to
+        # prevent, deliberately reintroduced for one closed cohort -- hence
+        # `log_grandfathered_decon_datasets`, so a held dataset is visible in
+        # the backfill log rather than merely absent. A recorded fingerprint
+        # that is non-NULL and differs is still a real mismatch and still
+        # re-submits, so future retunes keep working as designed.
+        return True
+    return recorded_params == decon_params_fingerprint()
 
 
 def zarr_deskew_data_dir(ds: LeafDataset, psf: Path | None) -> Path:
@@ -1157,13 +1233,35 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     ):
         return Path(existing["ticket_path"])
     data_dir = zarr_deskew_data_dir(ds, decon_psf)
-    if existing and existing["status"] == "failed":
-        _clean_stale_deskew_output(dsr_output_dir(data_dir, decon_psf))
-        # PetaKit5D skips a decon frame whose output already exists
-        # (`if exist(deconFullpath, 'file')`), so a Decon/ left behind by a
-        # failed run -- or by a run with a different PSF or wienerAlpha --
-        # would be silently reused forever instead of recomputed.
-        _clean_stale_deskew_output(data_dir / "Decon")
+    # Reaching here means neither early return above fired, so we are about to
+    # submit -- and therefore what is on disk was produced by a configuration
+    # that is NOT the one we are about to run (or by a run that crashed).
+    # Clearing it is not just tidy-up, it is required twice over:
+    #
+    #   * PetaKit5D skips a decon frame whose output already exists
+    #     (`if exist(deconFullpath, 'file') ... skip it!`, XR_RLdeconFrame3D.m),
+    #     so a Decon/ left behind by a run with a different PSF or wienerAlpha
+    #     would be silently reused forever instead of recomputed -- the stage
+    #     then reports `done` under the NEW provenance fingerprint while the
+    #     pixels are the old ones.
+    #   * `Decon/Masks/<fsname>_eroded.zarr` survives the intermediate reaper
+    #     (which only removes Decon/*.tif and the psfgen copy), and its mere
+    #     existence drives XR_RLdeconFrame3D.m:244 into `rmdirs`, which is not
+    #     a function anywhere in the vendored PetaKit5D -- every re-run of an
+    #     already-deconvolved dataset died there on 2026-09-21. Shimmed in
+    #     opym_local/src/opym/patches/rmdirs.m, but removing Decon/ outright
+    #     keeps the pipeline from depending on that shim at all.
+    #
+    # Gating this on a `failed` row (as it used to be) missed exactly the case
+    # that matters: a parameter retune re-submits over a `done` row.
+    # Unconditional here, with no "has this pipeline run before" guard: unlike
+    # the TIFF path's work_dir, `decon_stage/` is created by this pipeline and
+    # nothing else ever writes there, so anything inside it is ours.
+    # Trade-off: this deletes good existing output before recomputing, so a
+    # re-run that then fails loses the old result. That is the same trade the
+    # `failed`-only version already made, now applied consistently.
+    _clean_stale_deskew_output(dsr_output_dir(data_dir, decon_psf))
+    _clean_stale_deskew_output(data_dir / "Decon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     # Prefer the stores' own `z` coordinate array over the MDA_settings.yaml
