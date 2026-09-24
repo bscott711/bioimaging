@@ -82,3 +82,24 @@ def test_output_format_prefers_store_then_env_then_both(tmp_path, monkeypatch):
     monkeypatch.setenv("OPYM_OUTPUT_FORMAT", "bogus")
     assert cli._resolve_output_format(_Ds([plain])) == "both"
     assert cli._resolve_output_format(_Ds(None)) == "both"
+
+
+def test_watch_backfill_pauses_while_a_live_lease_is_held(monkeypatch):
+    from opym import lanes
+
+    lanes.write_lease(["live-session"])
+    events = []
+
+    def fake_sleep(s):
+        events.append(("sleep", s))
+        lanes.release_lease()  # the acquisition ends during the pause
+
+    def fake_run(roots, **kwargs):
+        events.append(("pass",))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli, "run_backfill", fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        cli.watch_backfill([Path("/nowhere")])
+    assert events == [("sleep", cli._LEASE_POLL_S), ("pass",)]

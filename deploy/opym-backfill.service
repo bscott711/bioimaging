@@ -19,9 +19,20 @@ Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/2026
 # source per dataset, so revisit if an acquisition at a different step lands
 # incomplete.
 Environment=OPYM_ZARR_DEFAULT_Z_STEP=0.5
+# Priority lanes (opym.lanes): at most this many backfill tickets queued or
+# running at once, 2 per GPU server so neither idles between tickets. Tickets
+# are then built shortly before they run, with current decon params, not days
+# ahead (on 2026-09-24, 36 queued tickets carried params superseded 3 days
+# earlier). Passes also pause entirely while a live acquisition holds the lease.
+Environment=OPYM_BACKFILL_MAX_INFLIGHT=4
+# Without this, print() to a file is block-buffered and the log lags.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/.local/bin/uv run opym-backfill --watch 120 --decon-psf /mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
 Restart=on-failure
 RestartSec=10
+# journalctl --user is not readable on this host (see opym-receive.service).
+StandardOutput=append:%h/projects/bioimaging/logs/opym-backfill.log
+StandardError=append:%h/projects/bioimaging/logs/opym-backfill.log
 
 [Install]
 WantedBy=default.target
