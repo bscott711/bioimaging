@@ -139,3 +139,100 @@ def test_export_writes_everything(tmp_path):
     assert json.loads((out / "viewer_export.json").read_text())["voxel_um"] == DSR_VOXEL_UM
     # And no half-written temporaries left behind.
     assert not list(src.glob("*.tmp*")) and not list(out.glob("*.tmp"))
+
+
+def _make_single_timepoint(d, names=("NewDay_006_GFP_488.ome", "NewDay_006_mScarlet_561.ome"),
+                           shape=(6, 8, 8)):
+    """A single-timepoint zarr dataset's DSR output: one frame per channel,
+    named after its store, plus a MIP that must be ignored."""
+    rng = np.random.default_rng(1)
+    for n in names:
+        # ome=False: tifffile would otherwise add OME-XML on its own for an
+        # `.ome.tif` name, and PetaKit5D's writetiff never does.
+        tifffile.imwrite(d / f"{n}.tif", (rng.random(shape) * 1000).astype(np.uint16),
+                         compression="lzw", ome=False)
+    tifffile.imwrite(d / f"{names[0]}_MIP_z.tif", np.zeros((4, 4), np.uint16))
+    return list(names)
+
+
+def test_parse_frames_single_timepoint_by_store_name(tmp_path):
+    """Rig 2026-09-23: single-timepoint streamed datasets matched no frames,
+    so they never got a viewer export at all."""
+    names = _make_single_timepoint(tmp_path)
+    assert parse_dsr_frames(tmp_path) == {}
+    frames = parse_dsr_frames(tmp_path, names)
+    assert frames == {(0, 0): tmp_path / f"{names[0]}.tif", (1, 0): tmp_path / f"{names[1]}.tif"}
+
+
+def test_export_single_timepoint_both(tmp_path):
+    zarr = pytest.importorskip("zarr")
+    src = tmp_path / "dsr"
+    src.mkdir()
+    names = _make_single_timepoint(src)
+    out = tmp_path / "viewer"
+    summary = export_for_viewers(src, out, name="NewDay_006", single_names=names,
+                                 channel_labels=["GFP 488", "mScarlet 561"])
+    assert summary["frames"] == 2 and summary["stamped"] == 2
+    g = zarr.open_group(str(out / "NewDay_006_dsr.ome.zarr"), mode="r")
+    assert g["0"].shape == (1, 2, 6, 8, 8)
+    cxc = (out / "NewDay_006_dsr.cxc").read_text()
+    assert f'open "{(src / f"{names[0]}.tif").resolve()}"' in cxc
+    assert "vseries" not in cxc
+
+
+@pytest.mark.parametrize("single", [False, True])
+def test_export_ome_zarr_only_replaces_tiffs_after_verifying(tmp_path, single):
+    zarr = pytest.importorskip("zarr")
+    src = tmp_path / "dsr"
+    src.mkdir()
+    if single:
+        names = _make_single_timepoint(src)
+    else:
+        names = None
+        _make_frames(src, channels=2, times=2, shape=(6, 8, 8))
+    originals = {k: tifffile.imread(p) for k, p in parse_dsr_frames(src, names).items()}
+
+    summary = export_for_viewers(src, tmp_path / "viewer", name="X",
+                                 single_names=names, output_format="ome-zarr")
+
+    assert summary["removed_tiffs"] == len(originals)
+    assert parse_dsr_frames(src, names) == {}
+    # PetaKit5D's MIPs are not ours to delete.
+    if single:
+        assert (src / f"{names[0]}_MIP_z.tif").is_file()
+    g = zarr.open_group(str(tmp_path / "viewer" / "X_dsr.ome.zarr"), mode="r")
+    times = sorted({t for _, t in originals})
+    for (c, t), vol in originals.items():
+        np.testing.assert_array_equal(g["0"][times.index(t), c], vol)
+    assert "chimerax" not in summary
+
+
+def test_export_tiff_only_skips_zarr(tmp_path):
+    src = tmp_path / "dsr"
+    src.mkdir()
+    _make_frames(src, channels=1, times=2, shape=(6, 8, 8))
+    out = tmp_path / "viewer"
+    summary = export_for_viewers(src, out, name="X", output_format="tiff")
+    assert summary["stamped"] == 2 and "ome_zarr" not in summary
+    assert not (out / "X_dsr.ome.zarr").exists()
+    assert len(parse_dsr_frames(src)) == 2
+
+
+def test_remove_frames_keeps_tiffs_on_mismatch(tmp_path):
+    pytest.importorskip("zarr")
+    from backfill.viewer_export import remove_frames_verified
+
+    src = tmp_path / "dsr"
+    src.mkdir()
+    _make_frames(src, channels=1, times=2, shape=(6, 8, 8))
+    out = write_ome_zarr(src, tmp_path / "x.ome.zarr", levels=1)
+    frames = parse_dsr_frames(src)
+    tifffile.imwrite(frames[(0, 1)], np.ones((6, 8, 8), np.uint16))  # diverge after export
+    with pytest.raises(RuntimeError, match="does not match"):
+        remove_frames_verified(frames, out)
+    assert frames[(0, 1)].is_file()
+
+
+def test_export_rejects_unknown_format(tmp_path):
+    with pytest.raises(ValueError, match="output_format"):
+        export_for_viewers(tmp_path, tmp_path / "v", name="X", output_format="png")

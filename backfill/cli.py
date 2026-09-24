@@ -31,7 +31,7 @@ from backfill.mip_movie import (
     build_poster_for_zarr_dataset,
     find_mip_files,
 )
-from backfill.viewer_export import channel_label, export_for_viewers
+from backfill.viewer_export import OUTPUT_FORMATS, channel_label, export_for_viewers
 from backfill.pipeline import (
     dataset_timepoints,
     detect_rois,
@@ -217,6 +217,20 @@ def _reap_decon_intermediates(ds: LeafDataset) -> None:
             frame.unlink(missing_ok=True)
 
 
+def _resolve_output_format(ds: LeafDataset) -> str:
+    """Per-dataset choice recorded on its raw stores by the stream client
+    (see opym.stream.rawmirror), else OPYM_OUTPUT_FORMAT, else "both" --
+    which is exactly what this export produced before the choice existed."""
+    from opym.stream.rawmirror import read_output_format
+
+    for store in ds.channel_zarr_paths or ():
+        fmt = read_output_format(store)
+        if fmt is not None:
+            return fmt
+    env = os.environ.get("OPYM_OUTPUT_FORMAT", "").strip()
+    return env if env in OUTPUT_FORMATS else "both"
+
+
 def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
     """Make the finished DSR openable in ChimeraX and napari without extra steps.
 
@@ -234,12 +248,22 @@ def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
         return
     try:
         labels = [channel_label(p.name) for p in ds.channel_zarr_paths] if ds.channel_zarr_paths else None
+        # A single-timepoint zarr dataset's DSR frames are named after their
+        # stores (`<store>.ome.tif`), not `_C<c>_T<t>.tif`.
+        single_names = (
+            [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
+            if ds.channel_zarr_paths else None
+        )
+        output_format = _resolve_output_format(ds)
         summary = export_for_viewers(
             dsr_dir, resolve_output_base(ds.leaf_dir) / "viewer",
             name=ds.leaf_dir.name, channel_labels=labels,
+            single_names=single_names, output_format=output_format,
         )
-        print(f"[backfill] {ds.dataset_key}: viewer export -- {summary['frames']} frame(s), "
-              f"{summary['stamped']} stamped, {summary['ome_zarr']}")
+        print(f"[backfill] {ds.dataset_key}: viewer export ({output_format}) -- "
+              f"{summary['frames']} frame(s), {summary['stamped']} stamped, "
+              f"{summary.get('ome_zarr', 'no OME-Zarr')}, "
+              f"{summary.get('removed_tiffs', 0)} TIFF frame(s) replaced by the OME-Zarr")
     except Exception as e:  # noqa: BLE001 - convenience output, never fatal
         print(f"[backfill] {ds.dataset_key}: viewer export failed (DSR output is unaffected): {e}")
 
@@ -373,12 +397,15 @@ def run_backfill(
     discover_only: bool = False,
     poll_interval_s: float = 30.0,
     mip_fps: float = 12.0,
+    wait_for_pending: bool = True,
 ) -> None:
     """`dry_run`: discovery + print only, zero registry writes -- a fully
     read-only preview. `discover_only`: real discovery + registers every
     dataset as pending in the registry (so the dashboard shows the real
     backlog) but stops before Phase A -- no crop/deskew/MIP work is run, no
     MATLAB tickets are submitted. Neither flag: the full real run.
+    `wait_for_pending=False` returns once Phase A is done instead of polling
+    until every submitted ticket resolves (see `_finish_pending`).
     """
     datasets = discover_leaf_datasets(roots)
     print(f"[backfill] discovered {len(datasets)} leaf dataset(s) across {len(roots)} root(s)")
@@ -512,13 +539,40 @@ def run_backfill(
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
     print(f"[backfill] Phase A complete. {len(pending)} dataset(s) still awaiting deskew resolution.")
-    while pending:
-        _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
-        if pending:
-            time.sleep(poll_interval_s)
+    _finish_pending(
+        pending, dataset_by_key, registry, mip_fps,
+        wait=wait_for_pending, poll_interval_s=poll_interval_s,
+    )
 
     registry.close()
     print("[backfill] Done.")
+
+
+def _finish_pending(
+    pending: dict[str, Path],
+    dataset_by_key: dict[str, LeafDataset],
+    registry: StatusRegistry,
+    mip_fps: float,
+    *,
+    wait: bool,
+    poll_interval_s: float,
+) -> None:
+    """Resolve what has finished; with `wait`, keep polling until nothing is
+    pending. Watch mode must not wait: one pass blocking on its slowest
+    ticket (days, for a large decon backlog -- or forever, for a ticket whose
+    server died mid-job) stops every later pass from discovering new data.
+    Anything left is safe to abandon here -- the next pass's Phase A hands
+    back the same in-flight ticket from the registry (see
+    `process_zarr_precropped_dataset`'s running-ticket reuse) and drains it.
+    """
+    _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
+    if not wait:
+        if pending:
+            print(f"[backfill] {len(pending)} ticket(s) still in flight -- re-checked next pass.")
+        return
+    while pending:
+        time.sleep(poll_interval_s)
+        _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
 
 def watch_backfill(
@@ -557,6 +611,7 @@ def watch_backfill(
                 discover_only=discover_only,
                 poll_interval_s=poll_interval_s,
                 mip_fps=mip_fps,
+                wait_for_pending=False,
             )
         except Exception as e:  # noqa: BLE001 - one bad pass must not kill the service
             print(f"[backfill] watch pass failed: {e!r}")
