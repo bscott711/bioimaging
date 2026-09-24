@@ -684,3 +684,21 @@ def test_zarr_submit_proceeds_under_the_inflight_cap(two_channel_store, monkeypa
 
     assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
     assert len(submitted) == 1
+
+
+def test_backfill_tickets_use_the_shared_decon_config(two_channel_store, monkeypatch):
+    """Both lanes build tickets from opym.decon_config.deskew_decon_kwargs, so
+    live and batch output can't drift apart. Pins the 2026-09-24 switch to
+    linear DSR interpolation (cubic took 13.6 s/frame on CPU) and that the
+    super4 decon parameters are unchanged by the move."""
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(
+        two_channel_store, monkeypatch
+    )
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+    kw = submitted[0]
+    assert kw["interp_method"] == "linear"
+    assert kw["xy_pixel_size"] == 0.136
+    assert kw["dsr_dir_name"] == "DSR_decon"
+    assert (kw["wiener_alpha"], kw["otf_cum_thresh"], kw["hann_win_bounds"]) == (0.20, 0.90, [0.4, 1.0])
+    assert (kw["damp_factor"], kw["edge_erosion"], kw["gpu_decon"]) == (2, 3, True)
+    assert pipeline.decon_params_fingerprint() == "a0.2_o0.9_h0.4-1.0_d2"
