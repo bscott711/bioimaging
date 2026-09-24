@@ -344,6 +344,11 @@ class _FakeRegistry:
         self._row(key)[f"stage:{stage}"] = {"status": "running", "ticket_path": ticket_path}
         self.started.append((key, stage))
 
+    def finish_stage(self, key, stage, *, status, output_path=None, ticket_path=None, error=None):
+        self._row(key)[f"stage:{stage}"] = {
+            "status": status, "ticket_path": ticket_path, "output_path": output_path
+        }
+
     def all_datasets(self):
         return list(self.rows.values())
 
@@ -702,3 +707,74 @@ def test_backfill_tickets_use_the_shared_decon_config(two_channel_store, monkeyp
     assert (kw["wiener_alpha"], kw["otf_cum_thresh"], kw["hann_win_bounds"]) == (0.20, 0.90, [0.4, 1.0])
     assert (kw["damp_factor"], kw["edge_erosion"], kw["gpu_decon"]) == (2, 3, True)
     assert pipeline.decon_params_fingerprint() == "a0.2_o0.9_h0.4-1.0_d2"
+
+
+
+# --- hand-off from the live lane (opym.stream.live) -----------------------
+
+
+def _live_output(tmp_path, psf, state, frames, **overrides):
+    """What the live lane leaves in the dataset's DSR dir."""
+    import json as _json
+    import time as _time
+
+    from backfill import pipeline
+
+    dsr = tmp_path / "decon_stage" / "Decon" / "DSR_decon"
+    dsr.mkdir(parents=True, exist_ok=True)
+    for c, t in frames:
+        (dsr / f"cell_001_C{c}_T{t:03d}.tif").write_bytes(b"live dsr")
+    status = {
+        "state": state,
+        "updated_at": _time.time(),
+        "decon_psf": str(psf.resolve()),
+        "decon_params": pipeline.decon_params_fingerprint(),
+        **overrides,
+    }
+    (dsr / ".live_status.json").write_text(_json.dumps(status))
+    return dsr
+
+
+ALL_FRAMES = [(c, t) for c in range(2) for t in range(3)]
+
+
+def test_complete_live_output_marks_deskew_done_without_a_ticket(two_channel_store, monkeypatch):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    dsr = _live_output(tmp_path, tmp_path / "psf.tif", "complete", ALL_FRAMES)
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    row = registry.get_stage("k", "deskew")
+    assert row["status"] == "done" and row["output_path"] == str(dsr)
+    assert registry.get_decon_params("k") == pipeline.decon_params_fingerprint()
+    assert (dsr / "cell_001_C1_T002.tif").exists()  # live output kept
+
+
+def test_running_live_lane_defers_the_batch(two_channel_store, monkeypatch):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    _live_output(tmp_path, tmp_path / "psf.tif", "running", ALL_FRAMES[:2])
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    assert registry.get_decon_params("k") != pipeline.decon_params_fingerprint()
+
+
+@pytest.mark.parametrize(
+    "state, frames, overrides",
+    [
+        ("complete", ALL_FRAMES[:-1], {}),  # a frame missing
+        ("failed", ALL_FRAMES, {}),
+        ("running", ALL_FRAMES[:2], {"updated_at": 0}),  # stale: receiver died
+        ("complete", ALL_FRAMES, {"decon_params": "a0.02_o0.9_h0.8-1.0_d1"}),
+    ],
+)
+def test_unusable_live_output_falls_back_to_batch(two_channel_store, monkeypatch, state, frames, overrides):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    dsr = _live_output(tmp_path, tmp_path / "psf.tif", state, frames, **overrides)
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+    assert len(submitted) == 1
+    assert not dsr.exists(), "the batch path's cleanup removes the partial live output"

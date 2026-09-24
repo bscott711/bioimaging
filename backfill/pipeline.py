@@ -26,6 +26,7 @@ from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
 from opym import lanes
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
+from opym.stream.live import live_status_is_fresh, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
@@ -1143,6 +1144,57 @@ def build_decon_staging_dir(
     return staging_dir
 
 
+def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf: Path | None) -> bool:
+    """Hand-off from the live lane (opym.stream.live), which deconvolves and
+    deskews a streamed acquisition timepoint by timepoint into this dataset's
+    own DSR directory and records the outcome in `.live_status.json` there.
+
+    True (skip submitting) when the live lane is still processing this
+    dataset, or has finished it with the same PSF and decon parameters and
+    every timepoint's frames are on disk; the latter also records deskew as
+    done, so only mip_encode and the viewer export remain. False otherwise
+    (no live run, failed, stale, or incomplete): the normal batch path runs,
+    and its stale-output cleanup removes whatever the live lane left.
+    """
+    if decon_psf is None:
+        return False
+    dsr_dir = dsr_output_dir(zarr_deskew_data_dir(ds, decon_psf), decon_psf)
+    status = read_live_status(dsr_dir)
+    if not status:
+        return False
+    if status.get("state") == "running" and live_status_is_fresh(status):
+        print(f"[backfill] {ds.dataset_key}: live lane still processing it, deferring")
+        return True
+    if status.get("state") != "complete":
+        return False
+    if status.get("decon_psf") != str(decon_psf) or status.get("decon_params") != decon_params_fingerprint():
+        return False
+    n_t = dataset_timepoints(ds)
+    n_c = len(ds.channel_zarr_paths)
+    frames = parse_dsr_frame_names(dsr_dir)
+    if n_t < 1 or not all((c, t) in frames for c in range(n_c) for t in range(n_t)):
+        print(
+            f"[backfill] {ds.dataset_key}: live output incomplete "
+            f"({len(frames)} of {n_t * n_c} frames), reprocessing in batch"
+        )
+        return False
+    registry.set_decon_psf(ds.dataset_key, str(decon_psf))
+    registry.set_decon_params(ds.dataset_key, decon_params_fingerprint())
+    registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(dsr_dir))
+    print(f"[backfill] {ds.dataset_key}: deskewed live ({n_t} timepoints), skipping batch deskew")
+    return True
+
+
+def parse_dsr_frame_names(dsr_dir: Path) -> set[tuple[int, int]]:
+    """(channel, timepoint) of every `<prefix>_C<c>_T<t>.tif` DSR frame."""
+    out = set()
+    for p in Path(dsr_dir).glob("*_C*_T*.tif"):
+        m = re.match(r"^.+_C(\d+)_T(\d+)\.tif$", p.name)
+        if m:
+            out.add((int(m.group(1)), int(m.group(2))))
+    return out
+
+
 def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
     """`submit_deskew_ticket`'s counterpart for `KIND_ZARR_PRECROPPED`
     datasets: no crop stage exists for these (already cropped/channel-split
@@ -1187,6 +1239,8 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
     ):
         return Path(existing["ticket_path"])
+    if _live_lane_owns_deskew(ds, registry, decon_psf):
+        return None
     if _backfill_lane_closed(ds):
         return None
     data_dir = zarr_deskew_data_dir(ds, decon_psf)
