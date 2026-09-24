@@ -1,0 +1,27 @@
+[Unit]
+Description=opym-serve: GPU deskew watchdog (opym.local_gpu_worker + PetaKit5D MATLAB servers)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+ExecStart=%h/projects/bioimaging/.venv/bin/opym-serve
+# Hang handling (see opym.local_gpu_worker): a claimed ticket whose dataDir
+# has had nothing written for this many minutes is flagged, and with
+# KILL_HUNG=1 its server is killed so the GPU comes back and the ticket is
+# requeued (at most twice, then failed/). Added after server 2 sat hung for
+# 43 h on 2026-09-23 with no GPU work done.
+Environment=OPYM_SERVE_HANG_MIN=60
+Environment=OPYM_SERVE_KILL_HUNG=1
+# Without this, print() to a file is block-buffered and the log lags by kB.
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10
+# journalctl --user is not readable on this host, even for a unit's own
+# account (see opym-receive.service). Log to a plain file instead; the
+# MATLAB servers inherit this stdout, so their per-ticket lines land here too.
+StandardOutput=append:%h/projects/bioimaging/logs/opym-serve.log
+StandardError=append:%h/projects/bioimaging/logs/opym-serve.log
+
+[Install]
+WantedBy=default.target

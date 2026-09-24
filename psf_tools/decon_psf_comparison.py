@@ -60,7 +60,7 @@ def _wait_for_tickets(tickets, label):
 
 
 def run_comparison(target_dir, psf_candidates, iterations=25, rl_method="simplified",
-                    sheet_angle_deg=60.0, z_step_um=0.3):
+                    sheet_angle_deg=60.0, z_step_um=0.3, dz_psf=0.1):
     """``psf_candidates``: dict of {label: psf_path}, e.g.
     {"old_master": ..., "workstream1": ..., "workstream2": ...}."""
     target_dir = Path(target_dir)
@@ -79,6 +79,8 @@ def run_comparison(target_dir, psf_candidates, iterations=25, rl_method="simplif
             result_dir_name=result_dir,
             channel_patterns=[channel_pattern],
             rl_method=rl_method,
+            z_step_um=z_step_um,
+            dz_psf=dz_psf,
         )
         decon_tickets.append((ticket, result_dir))
         time.sleep(0.005)  # guarantee unique ticket-file timestamps

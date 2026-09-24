@@ -6,6 +6,10 @@ from opym.petakit import submit_remote_decon_job, submit_remote_deskew_job
 def main():
     target_dir = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/20260402_py_FLM_2XFyve_mSca_mem_NG/20260402_py_FLM_2XFyve_mSca_mem_NG/cell/cell_MMStack_Pos0_test")
     psf_path = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260622_averaged_psf.tif")
+    # Both z-steps are required by the decon jobType: psf_gen_new decimates the
+    # PSF's z by z_step_um/dz_psf, so a guessed default shrinks it silently.
+    z_step_um = 0.3   # this dataset's scan step, same value the deskew below uses
+    dz_psf = 0.1      # 20260622_averaged_psf.tif's own z-step
     base_dir = Path.home() / "petakit_jobs"
     
     # Ensure opym is in path if this script runs directly from bioimaging
@@ -42,6 +46,8 @@ def main():
                 result_dir_name=result_dir,
                 channel_patterns=[channel_pattern],
                 rl_method=method,
+                z_step_um=z_step_um,
+                dz_psf=dz_psf,
             )
             decon_tickets.append((ticket, result_dir))
             # Sleep 5ms to guarantee unique timestamps for the ticket filenames

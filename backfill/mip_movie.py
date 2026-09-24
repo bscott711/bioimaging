@@ -1,0 +1,265 @@
+"""Encodes the per-timepoint Z-MIP TIFFs PetaKit5D writes (once `save_mip`
+is enabled, see opym's run_petakit_server.m) into browsable WebM/VP9 movies
+for the Argus dashboard's MIP browser.
+
+No movie-encoding code existed anywhere in these repos before this --
+`bioimaging/scripts/export_mip_tif.py` is the closest precedent (globs a
+`Decon/` dir's per-T,C zarr stores and writes one static ImageJ-hyperstack
+TIFF per channel), reused here for its glob/group-by-channel pattern only;
+this module's input is already-2D MIP TIFFs (PetaKit5D did the Z-max
+itself) and its output is an actual video, not a static TIFF stack.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import imageio.v3 as iio
+import numpy as np
+import tifffile
+
+_MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
+
+# WebM/VP9, not MP4/H.264: Argus's Firefox (RHEL9) reports "H264 NONE" in
+# about:support -- RHEL doesn't ship a patent-licensed H.264 decoder Firefox
+# can use for <video> playback (the system's OpenH264 package is usable by
+# Firefox for WebRTC only, per Cisco's distribution license, not for regular
+# video). Confirmed with a real H.264/mp4 file that decoded fine via ffmpeg,
+# GStreamer, and headless Chromium, yet still failed in actual Firefox with
+# NS_ERROR_DOM_MEDIA_METADATA_ERR -- re-muxing and re-encoding at baseline
+# profile didn't help either, so it isn't a container/profile quirk, it's
+# categorical codec absence. VP9 shows "SW" (built-in software decode, no
+# system dependency) in the same about:support output, so it's the portable
+# choice -- not just a fix for this one machine.
+_VP9_PARAMS = ["-deadline", "realtime", "-cpu-used", "8", "-crf", "32", "-b:v", "0"]
+
+# Fixed per-channel pseudo-colors for the additive composite view (RGB,
+# 0-1 floats) -- green/magenta/yellow/red covers the 4-channel-per-excitation
+# output map (see core.py: 0=Bot-C0, 1=Top-C0, 2=Top-C1, 3=Bot-C1) with
+# maximally distinguishable hues; extra channels beyond 4 cycle back. The
+# common 2-channel case (one excitation) is green/magenta, not cyan/magenta.
+_CHANNEL_COLORS = [
+    (0.0, 1.0, 0.0),  # green
+    (1.0, 0.0, 1.0),  # magenta
+    (1.0, 1.0, 0.0),  # yellow
+    (1.0, 0.15, 0.15),  # red
+]
+
+
+def find_mip_files(mips_dir: Path) -> dict[int, list[tuple[int, Path]]]:
+    """Groups `<name>_C{c}_T{t}_MIP_z.tif` files by channel, sorted by T."""
+    by_channel: dict[int, list[tuple[int, Path]]] = {}
+    if not mips_dir.is_dir():
+        return by_channel
+    for f in mips_dir.glob("*_MIP_z.tif"):
+        m = _MIP_RE.search(f.name)
+        if not m:
+            continue
+        c, t = int(m.group(1)), int(m.group(2))
+        by_channel.setdefault(c, []).append((t, f))
+    for files in by_channel.values():
+        files.sort(key=lambda pair: pair[0])
+    return by_channel
+
+
+def load_channel_stack(files: list[tuple[int, Path]]) -> np.ndarray:
+    """(T, Y, X) stack -- these MIP files are already 2D (PetaKit5D did the
+    Z-max), so no further projection is needed here.
+
+    Drops any frame whose shape doesn't match the MODAL (most common) shape
+    across this channel's files, rather than letting `np.stack` raise.
+    Confirmed real cause: a MIP left over from a run predating a later
+    deskew-geometry fix (a different crop/rotation output size) sitting
+    alongside a full run of correctly-sized frames from the CURRENT
+    geometry -- one stale file from an old run shouldn't crash `mip_encode`
+    for a dataset that otherwise processed cleanly. The stale file is also
+    removed from disk (mirroring `_clean_stale_deskew_output`'s "clear
+    before regenerating" pattern) so it doesn't need re-detecting -- and
+    re-warning about -- on every later pass; it's redundant, superseded
+    data, not something worth keeping around.
+    """
+    loaded = [(p, tifffile.imread(p)) for _t, p in files]
+    shape_counts: dict[tuple[int, ...], int] = {}
+    for _p, frame in loaded:
+        shape_counts[frame.shape] = shape_counts.get(frame.shape, 0) + 1
+    modal_shape = max(shape_counts, key=shape_counts.get)
+
+    kept = []
+    for p, frame in loaded:
+        if frame.shape == modal_shape:
+            kept.append(frame)
+            continue
+        print(
+            f"[mip_movie] dropping stale MIP frame {p.name} (shape {frame.shape} "
+            f"!= this channel's modal shape {modal_shape}, likely left over from "
+            "a run with different crop/deskew geometry)"
+        )
+        p.unlink(missing_ok=True)
+    return np.stack(kept, axis=0)
+
+
+def normalize_for_video(
+    stack: np.ndarray, low_pct: float = 1.0, high_pct: float = 99.8
+) -> np.ndarray:
+    """Percentile-stretches to uint8 using ONE shared (low, high) computed
+    across the whole T-stack (not per-frame), so brightness doesn't flicker
+    frame-to-frame during playback.
+    """
+    lo, hi = np.percentile(stack, [low_pct, high_pct])
+    if hi <= lo:
+        return np.zeros_like(stack, dtype=np.uint8)
+    scaled = (stack.astype(np.float32) - lo) / (hi - lo)
+    return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
+
+
+def encode_channel_movie(stack_u8: np.ndarray, out_path: Path, fps: float = 12.0) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(
+        out_path, stack_u8, fps=fps, codec="libvpx-vp9", pixelformat="yuv420p",
+        output_params=_VP9_PARAMS,
+    )
+    return out_path
+
+
+def encode_composite_movie(
+    channel_stacks: dict[int, np.ndarray], out_path: Path, fps: float = 12.0
+) -> Path:
+    """Additively blends per-channel-normalized uint8 stacks into a single
+    pseudo-colored RGB movie -- the default triage view."""
+    channels = sorted(channel_stacks)
+    t_len = next(iter(channel_stacks.values())).shape[0]
+    shape_yx = next(iter(channel_stacks.values())).shape[1:]
+
+    composite = np.zeros((t_len, *shape_yx, 3), dtype=np.float32)
+    for i, c in enumerate(channels):
+        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        gray = channel_stacks[c].astype(np.float32) / 255.0  # (T, Y, X)
+        composite += gray[..., None] * color
+
+    composite_u8 = np.clip(composite, 0, 1.0)
+    composite_u8 = (composite_u8 * 255.0).astype(np.uint8)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(
+        out_path, composite_u8, fps=fps, codec="libvpx-vp9", pixelformat="yuv420p",
+        output_params=_VP9_PARAMS,
+    )
+    return out_path
+
+
+def encode_poster_image(frame_u8: np.ndarray, out_path: Path) -> Path:
+    """A static first-frame JPEG alongside each movie. `<video>` shows a
+    black box until it has enough data to paint a frame -- true even with
+    faststart, and doubly true if a browser has throttled/deferred autoplay
+    (which it will, once a page has hundreds of thumbnails). An explicit
+    `poster=` is the standard fix: something meaningful renders immediately,
+    independent of whether/when the video itself starts playing.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_path, frame_u8, extension=".jpg")
+    return out_path
+
+
+def build_poster_for_zarr_dataset(
+    dsr_dir: Path, channel_fsnames: list[str], out_dir: Path
+) -> Path:
+    """Poster-only counterpart to `build_mip_movies_for_dataset`, for
+    pre-cropped zarr-input datasets (`opym.discovery.KIND_ZARR_PRECROPPED`).
+
+    Every real example of this acquisition format seen so far is a single
+    timepoint (no `time_plan` in its `MDA_settings.yaml`) -- PetaKit5D names
+    its MIP output `<fsname>_MIP_z.tif` with no `_C{c}_T{t}` suffix at all
+    (that suffix is specific to this pipeline's own TIFF_SERIES splitting,
+    not a PetaKit5D convention), confirming there's really one frame per
+    channel here, not a T-stack to encode as a movie. A one-frame "movie" is
+    a degenerate, confusing case anyway (see the MP4/WebM playback
+    debugging earlier this session) -- a static poster is the honest
+    representation.
+
+    Writes a single `triage_preview.jpg` (blended across channels if more
+    than one) directly into `out_dir` -- deliberately the SAME filename the
+    dashboard already falls back to for a not-yet-fully-processed dataset
+    (see `opym-dashboard`'s `_annotate_row`/`mip_detail`), so a finished
+    zarr-input dataset needs zero dashboard-side special-casing: it's still
+    "one representative static image," just for a different reason.
+    """
+    mips_dir = dsr_dir / "MIPs"
+    frames_u8: dict[str, np.ndarray] = {}
+    for fsname in channel_fsnames:
+        mip_path = mips_dir / f"{fsname}_MIP_z.tif"
+        if not mip_path.is_file():
+            continue
+        frame = tifffile.imread(mip_path)
+        frames_u8[fsname] = normalize_for_video(frame)
+
+    if not frames_u8:
+        raise FileNotFoundError(
+            f"No MIP TIFFs found under {mips_dir} for channels {channel_fsnames}"
+        )
+
+    out_path = out_dir / "triage_preview.jpg"
+    if len(frames_u8) == 1:
+        return encode_poster_image(next(iter(frames_u8.values())), out_path)
+
+    blended = np.zeros((*next(iter(frames_u8.values())).shape, 3), dtype=np.float32)
+    for i, frame_u8 in enumerate(frames_u8.values()):
+        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        blended += (frame_u8.astype(np.float32) / 255.0)[..., None] * color
+    blended_u8 = (np.clip(blended, 0, 1.0) * 255.0).astype(np.uint8)
+    return encode_poster_image(blended_u8, out_path)
+
+
+def write_composite(
+    normalized_stacks: dict[int, np.ndarray], composite_path: Path, fps: float = 12.0
+) -> list[Path]:
+    """Writes the composite movie + its frame-0 poster from already
+    per-channel-normalized uint8 stacks (see `normalize_for_video`). Split
+    out of `build_mip_movies_for_dataset` so a color-only re-blend (see
+    `scripts/reblend_composites.py`) can regenerate just these two files
+    from the source MIP TIFFs, without re-encoding the untouched
+    per-channel movies.
+    """
+    written = [encode_composite_movie(normalized_stacks, composite_path, fps=fps)]
+    # Recompute frame 0 of the composite blend for its poster (cheap --
+    # one frame -- rather than threading it back out of
+    # encode_composite_movie's internals).
+    first_frame = np.zeros((*normalized_stacks[next(iter(normalized_stacks))].shape[1:], 3), dtype=np.float32)
+    for i, c in enumerate(sorted(normalized_stacks)):
+        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        first_frame += (normalized_stacks[c][0].astype(np.float32) / 255.0)[..., None] * color
+    first_frame_u8 = (np.clip(first_frame, 0, 1.0) * 255.0).astype(np.uint8)
+    written.append(encode_poster_image(first_frame_u8, composite_path.with_suffix(".jpg")))
+    return written
+
+
+def build_mip_movies_for_dataset(
+    dsr_dir: Path, sanitized_name: str, out_dir: Path, fps: float = 12.0
+) -> list[Path]:
+    """Orchestrates the above for one dataset. Writes to
+    `<leaf_dir>/mip_movies/` -- a flat, crop-format-agnostic location (NOT
+    nested under `DSR_nodecon/MIPs/`) so the registry and the dashboard can
+    find every dataset's movies via one predictable glob regardless of
+    internal crop-stage layout. Each movie gets a same-named `.jpg` poster
+    (`<name>.webm` -> `<name>.jpg`) for the dashboard's thumbnail grid.
+    """
+    mips_dir = dsr_dir / "MIPs"
+    by_channel = find_mip_files(mips_dir)
+    if not by_channel:
+        raise FileNotFoundError(f"No MIP TIFFs found under {mips_dir}")
+
+    written: list[Path] = []
+    normalized_stacks: dict[int, np.ndarray] = {}
+    for c, files in by_channel.items():
+        stack = load_channel_stack(files)
+        stack_u8 = normalize_for_video(stack)
+        normalized_stacks[c] = stack_u8
+        out_path = out_dir / f"{sanitized_name}_C{c}.webm"
+        written.append(encode_channel_movie(stack_u8, out_path, fps=fps))
+        written.append(encode_poster_image(stack_u8[0], out_path.with_suffix(".jpg")))
+
+    if len(normalized_stacks) > 1:
+        composite_path = out_dir / f"{sanitized_name}_composite.webm"
+        written.extend(write_composite(normalized_stacks, composite_path, fps=fps))
+
+    return written

@@ -1,0 +1,27 @@
+[Unit]
+Description=opym-backfill: continuous OPM backfill discovery (watch mode)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
+# Decon is opt-in, and carried here rather than only in the installed copy so a
+# reinstall from this repo cannot silently revert production to deskew-only.
+Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# Named z step for stores that ship without their own `z` coordinate array (an
+# interrupted or still-transferring acquisition). pipeline.py refuses to guess
+# by default rather than deskew at a silently wrong scale; 0.3 (the
+# OPYM_ZARR_ALLOW_DEFAULT_Z_STEP fallback) is wrong for every dataset in this
+# corpus, which is 0.1 or 0.5. 0.5 is what every sibling of 20260917/Cell_007 --
+# the dataset this was added for -- measures from its own store. This applies to
+# ANY store missing its z array, not just that one; the backfill log reports the
+# source per dataset, so revisit if an acquisition at a different step lands
+# incomplete.
+Environment=OPYM_ZARR_DEFAULT_Z_STEP=0.5
+ExecStart=%h/.local/bin/uv run opym-backfill --watch 120 --decon-psf /mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

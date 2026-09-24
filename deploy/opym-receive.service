@@ -1,0 +1,38 @@
+[Unit]
+Description=opym-receive: real-time frame-streaming ingress (opym.stream)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+# MUST match opym-backfill.service's own `--decon-psf` flag (which sets
+# this same env var in-process -- see run_backfill_cli.py -- but only for
+# ITS OWN process; opym-receive is a separate service and does not inherit
+# it). If the two ever disagree, the receiver's pre-staged decon_stage/
+# TIFFs and the batch pass's decon-vs-deskew-only decision will disagree
+# too -- see opym.stream.receiver's module docstring. Leave unset (or
+# empty) to match a deskew-only backfill (no --decon-psf).
+Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# RAM-disk staging (opt-in, unset = write straight to each session's
+# declared raw_root on GPFS, today's original behavior). Set so PetaKit5D's
+# deskew/decon reads with zero GPFS latency -- see
+# opym.stream.receiver's module docstring and opym.stream.drain. A
+# background DrainPool copies each completed session to GPFS, verified
+# byte-for-byte, so GPFS stays the durable system of record; tmpfs is
+# volatile and only ever a staging copy of what a session already landed
+# on GPFS via this drain.
+Environment=OPYM_STREAM_STAGE_ROOT=/dev/shm/opym_stream_stage
+ExecStart=%h/.local/bin/uv run opym-receive
+Restart=on-failure
+RestartSec=10
+# journalctl --user is NOT readable on this host even by the service's own
+# owning account (confirmed 2026-09-23: "No journal files were opened due
+# to insufficient permissions" for bscott's own --user unit) -- true for
+# every service here, not just this one. Redirect to a plain file instead
+# so SESSION_START/SESSION_END/drain-queued/drained lines (the only way to
+# confirm a streamed acquisition actually landed) are actually readable.
+StandardOutput=append:%h/projects/bioimaging/logs/opym-receive.log
+StandardError=append:%h/projects/bioimaging/logs/opym-receive.log
+
+[Install]
+WantedBy=default.target

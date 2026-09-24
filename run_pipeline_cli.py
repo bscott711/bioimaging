@@ -5,8 +5,6 @@ import json
 import numpy as np
 import tifffile
 import zarr
-import scipy.ndimage
-import skimage.measure
 from pathlib import Path
 import math
 import multiprocessing as mp
@@ -17,6 +15,8 @@ sys.path.append(str(Path.home() / "projects" / "opym_local" / "src"))
 from opym.petakit import submit_pipeline_batch_job
 from opym.consolidate import consolidate_to_ome_zarr
 from opym.utils import orient_zyx_for_dsr
+from opym.roi_detect import auto_detect_rois, compute_reference_projection
+from psf_tools.extraction_plan import get_extraction_plan
 
 # Max (timepoint, channel) frames bundled into one pipeline_batch ticket.
 # Frames are grouped by PSF (laser/channel) first, then batched across
@@ -27,123 +27,6 @@ from opym.utils import orient_zyx_for_dsr
 # granularity (see Phase 2.3's real-data timing).
 MAX_BATCH_SIZE = 30
 
-def auto_detect_rois(z_array, master_roi_path=None):
-    print("\n🔍 Auto-detecting ROIs from T=0...")
-    
-    master_h, master_w = 200, 200
-    if master_roi_path and master_roi_path.exists():
-        try:
-            with open(master_roi_path, 'r') as f:
-                d = json.load(f)
-                master_h = d.get("max_h", 200)
-                master_w = d.get("max_w", 200)
-            print(f"   📂 Loaded previous bounds from master_roi.json (H: {master_h}, W: {master_w})")
-        except: pass
-
-    print("   Fetching T=0 chunk from Zarr...")
-    if z_array.ndim == 5:
-        # Usually (T, C, Z, Y, X) or (T, Z, C, Y, X). Let's take T=0, C/Z=0
-        t0_data = z_array[0, 0]
-    elif z_array.ndim == 4:
-        t0_data = z_array[0]
-    else:
-        t0_data = z_array
-        
-    print("   Projecting over Z and Channels...")
-    if t0_data.ndim >= 3:
-        proj_axes = tuple(range(t0_data.ndim - 2))
-        max_proj = np.max(t0_data, axis=proj_axes)
-    else:
-        max_proj = t0_data
-        
-    max_y, max_x = max_proj.shape
-    half_y = max_y // 2
-    
-def auto_detect_rois(z, master_roi_path=None):
-    import numpy as np
-    from skimage.measure import regionprops, label
-    import json
-    import scipy.ndimage
-    import skimage.measure
-    
-    # Fast projection of middle timepoint to find ROIs
-    t_mid = z.shape[0] // 2
-    if len(z.shape) == 5:
-        # z shape might be (T,C,Z,Y,X) or (T,Z,C,Y,X)
-        if z.shape[1] < z.shape[2]: # (T,C,Z,Y,X)
-            img = z[t_mid, 0, z.shape[2]//2, :, :]
-        else: # (T,Z,C,Y,X)
-            img = z[t_mid, z.shape[1]//2, 0, :, :]
-    else:
-        return None, None
-        
-    max_proj = np.array(img)
-    max_y, max_x = max_proj.shape
-    half_y = max_y // 2
-    
-    def _find_half_roi(image_half, offset_y=0):
-        # Apply massive blur to turn the image into a smooth heat map
-        smoothed = scipy.ndimage.gaussian_filter(image_half, sigma=20)
-        
-        # Find the coordinates of the absolute maximum intensity
-        y_peak, x_peak = np.unravel_index(np.argmax(smoothed, axis=None), smoothed.shape)
-        
-        return {
-            "y_center": int(y_peak + offset_y),
-            "x_center": int(x_peak)
-        }
-
-    top_roi_dict = _find_half_roi(max_proj[:half_y, :], 0)
-    bot_roi_dict = _find_half_roi(max_proj[half_y:, :], half_y)
-    
-    valid_rois = [r for r in [top_roi_dict, bot_roi_dict] if r is not None]
-    rois_out = []
-    
-    if valid_rois:
-        EXPECTED_H = 576
-        EXPECTED_W = 1152
-            
-        import scipy.fft
-        max_h = scipy.fft.next_fast_len(EXPECTED_H)
-        max_w = scipy.fft.next_fast_len(EXPECTED_W)
-        
-        if master_roi_path:
-            try:
-                with open(master_roi_path, 'w') as f:
-                    json.dump({"max_h": max_h, "max_w": max_w}, f)
-            except: pass
-            
-        for r_dict in [top_roi_dict, bot_roi_dict]:
-            if r_dict is None:
-                rois_out.append(None)
-                continue
-                
-            y_center = r_dict["y_center"]
-            x_center = r_dict["x_center"]
-            
-            new_ymin = max(0, y_center - max_h // 2)
-            new_ymax = new_ymin + max_h
-            
-            new_xmin = max(0, x_center - max_w // 2)
-            new_xmax = min(max_x, new_xmin + max_w)
-            
-            if new_xmax > max_x:
-                new_xmax = max_x
-                new_xmin = max(0, new_xmax - max_w)
-            
-            print(f"   Optical FOV ROI: Y[{new_ymin}:{new_ymax}], X[{new_xmin}:{new_xmax}]")
-            rois_out.append((slice(new_ymin, new_ymax), slice(new_xmin, new_xmax)))
-    
-    if not rois_out:
-        print("❌ Could not detect any valid structures!")
-        
-    # Return (top_roi, bot_roi)
-    if len(rois_out) == 1:
-        return rois_out[0], None
-    elif len(rois_out) >= 2:
-        return rois_out[0], rois_out[1]
-    return None, None
-
 def get_z_step(target_path: Path):
     acq_settings = target_path.parent / "AcqSettings.txt"
     if acq_settings.exists():
@@ -151,60 +34,6 @@ def get_z_step(target_path: Path):
             d = json.load(f)
             return float(d.get("stepSizeUm", 0.3))
     return 0.3
-
-def get_extraction_plan(target_path: Path):
-    from psf_tools.analyze_channels import analyze_directory, parse_name_for_fluorophores
-    base_dir = target_path.parent.parent
-    results = analyze_directory(str(base_dir))
-    folder_name = target_path.parent.name
-    
-    match = next((r for r in results if r["Folder"] == folder_name), None)
-    if not match: return []
-    
-    detected = match["Detected_Channels"]
-    if not detected:
-        detected = parse_name_for_fluorophores(base_dir.name)
-        
-    raw_configs = match["Raw_Configs"]
-    
-    has_488 = any("488" in c for c in detected)
-    has_405 = any("405" in c for c in detected)
-    has_561 = any("561" in c for c in detected)
-    has_640 = any("640" in c for c in detected)
-    
-    plan = []
-    out_c = 0
-    
-    if len(raw_configs) <= 1:
-        if has_488: 
-            plan.append((0, True, "488nm", out_c))
-            out_c += 1
-        if has_405: 
-            plan.append((0, False, "405nm", out_c))
-            out_c += 1
-        if has_561: 
-            plan.append((1, True, "561nm", out_c))
-            out_c += 1
-        if has_640: 
-            plan.append((1, False, "640nm", out_c))
-            out_c += 1
-    else:
-        for i, config in enumerate(raw_configs):
-            config_lower = config.lower()
-            if "488" in config_lower: 
-                plan.append((i*2 + 0, True, "488nm", out_c))
-                out_c += 1
-            if "405" in config_lower: 
-                plan.append((i*2 + 0, False, "405nm", out_c))
-                out_c += 1
-            if "561" in config_lower: 
-                plan.append((i*2 + 1, True, "561nm", out_c))
-                out_c += 1
-            if "640" in config_lower: 
-                plan.append((i*2 + 1, False, "640nm", out_c))
-                out_c += 1
-            
-    return plan
 
 def process_chunk(t_start, t_end, target_path, c_axis, extraction_plan, top_roi, bot_roi, base_name, output_dir_base, psf_map, z_step_um, psf_dz_um, debug, worker_id):
     """
@@ -356,7 +185,8 @@ def main():
     z = zarr.open(store, mode='r')
     print(f"✅ Parsed in {time.time()-st:.2f}s. Zarr shape: {z.shape}")
     
-    top_roi, bot_roi = auto_detect_rois(z, master_roi_path=master_roi_path)
+    max_proj = compute_reference_projection(z, timepoint=z.shape[0] // 2)
+    top_roi, bot_roi = auto_detect_rois(max_proj, master_roi_path=master_roi_path)
     
     num_t = z.shape[0]
     
