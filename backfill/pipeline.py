@@ -26,6 +26,7 @@ from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
 from opym import lanes
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
+from opym.stream.live import live_status_is_fresh, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
@@ -39,31 +40,21 @@ from psf_tools.extraction_plan import get_extraction_plan
 
 from backfill.mip_movie import encode_poster_image, normalize_for_video
 
-# Deconvolution settings, fixed here rather than left to PetaKit5D's defaults.
-# All four fail quietly if left to PetaKit5D's own defaults:
-#   * wienerAlpha defaults to 0.005, visibly over-sharpened on these volumes.
-#     0.02 was the decon-order comparison's value; a low-SNR-focused 22-variant
-#     then 20-variant refinement sweep on Cell_005 (see README.md's "Decon
-#     parameter tuning" section for the two review artifacts) picked 0.20,
-#     paired with the hann/damp changes below -- alone, higher alpha only
-#     marginally helped.
-#   * hannWinBounds defaults to [0.8, 1.0]; lowering the lower bound to 0.4
-#     (more apodization) is one of the three knobs the sweep's winning
-#     "super4" combination changed together.
-#   * dampFactor defaults to 1 (off, decon_lucy_omw_function.m); 2 caps a
-#     decon value's departure from its own input by 2x -- the direct remedy
-#     for isolated over-sharpened voxel spikes the sweep was counting.
-#   * edgeErosion defaults to 0, which leaves a bright ringing stripe along the
-#     slab boundary -- RLdecon.m applies `edgetaper` per z-PLANE, so the axial
-#     faces are never tapered and the FFT wraps there. Eroding 3 voxels removes
-#     it, for ~6% of the imaged slab. Unchanged by the sweep above.
-# Changing any of these changes what the output looks like, so they belong
-# in the ticket (and therefore the log) rather than in a MATLAB default.
-DECON_WIENER_ALPHA = 0.20
-DECON_OTF_CUM_THRESH = 0.90  # unchanged from the old default; the sweep's super4 kept it
-DECON_HANN_WIN_BOUNDS = [0.4, 1.0]
-DECON_DAMP_FACTOR = 2
-DECON_EDGE_EROSION = 3
+# Decon + DSR settings live in opym.decon_config, shared with the live lane
+# (opym.stream.live) so both paths build identical tickets. The rationale for
+# every value is documented there.
+from opym.decon_config import (  # noqa: E402,F401 - re-exported for existing callers
+    DECON_DAMP_FACTOR,
+    DECON_EDGE_EROSION,
+    DECON_HANN_WIN_BOUNDS,
+    DECON_OTF_CUM_THRESH,
+    DECON_WIENER_ALPHA,
+    DSR_INTERP_METHOD,
+    decon_params_fingerprint,
+    deskew_decon_kwargs,
+    dsr_dir_name_for,
+    resolve_decon_psf,
+)
 
 
 
@@ -659,19 +650,9 @@ def submit_deskew_ticket(
         deskew=True,
         rotate=True,
         psf_path=decon_psf,
-        dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
-        wiener_alpha=DECON_WIENER_ALPHA,
-        otf_cum_thresh=DECON_OTF_CUM_THRESH,
-        hann_win_bounds=DECON_HANN_WIN_BOUNDS,
-        damp_factor=DECON_DAMP_FACTOR,
-        edge_erosion=DECON_EDGE_EROSION,
-        # Without this the ticket carries gpu_decon:false and PetaKit5D runs
-        # the RL iterations on CPU -- both cards sit at 0% while the parfor
-        # pool grinds. The volumes are small in skewed space (~29M voxels),
-        # so this fits many times over in 97 GB.
-        gpu_decon=True,
         save_mip=True,
+        **deskew_decon_kwargs(decon_psf),
     )
     if ticket_path is None:
         return None
@@ -928,48 +909,6 @@ def build_zarr_pyramid_mirror(
     return mirror_dir
 
 
-def resolve_decon_psf() -> Path | None:
-    """The PSF deconvolution should run with, or None for deskew-only.
-
-    Read from the `OPYM_DECON_PSF` environment variable rather than threaded
-    through as an argument, matching how the other run-scoped switches here
-    work (`OPYM_ZARR_MAX_TIMEPOINTS`, `OPYM_ZARR_ALLOW_DEFAULT_Z_STEP`): the
-    backfill fans datasets out across a process pool, and an env var is
-    inherited by every worker without changing any worker signature.
-    `run_backfill_cli.py --decon-psf` sets it.
-
-    Unset means today's behavior exactly -- no decon, `DSR_nodecon`.
-    """
-    raw = os.environ.get("OPYM_DECON_PSF", "").strip()
-    if not raw:
-        return None
-    psf = Path(raw).expanduser()
-    if not psf.is_file():
-        raise FileNotFoundError(
-            f"OPYM_DECON_PSF points at {psf}, which is not a file. Refusing to "
-            "fall back to deskew-only silently -- unset it to run without decon."
-        )
-    return psf.resolve()
-
-
-def dsr_dir_name_for(psf: Path | None) -> str:
-    """Output directory name for a DSR result, keyed on whether decon ran.
-
-    Deconvolved output goes to a DIFFERENT directory than deskew-only output
-    so the two can coexist and be compared, and so enabling decon never
-    silently overwrites the existing no-decon archive. Both
-    `submit_*_deskew_ticket` (which names the output) and `_dsr_dir_for` in
-    `backfill/cli.py` (which finds it again afterwards) must derive it from
-    here, or the reader looks in the wrong place -- the exact bug class
-    `_dsr_dir_for`'s own docstring documents twice.
-
-    The bare name `DSR` is deliberately not used: the PSF-tuning harnesses
-    (`psf_tools/sweep_deskew_angles.py`, `psf_tools/omw_rl_comparison.py`)
-    already write unrelated output under that name.
-    """
-    return "DSR_decon" if psf else "DSR_nodecon"
-
-
 def dsr_output_dir(data_dir: Path, psf: Path | None) -> Path:
     """Where PetaKit5D actually writes the DSR result, given the ticket's
     `dataDir`.
@@ -1035,22 +974,6 @@ def log_grandfathered_decon_datasets(registry, psf: Path | None) -> int:
             "re-deconvolve them."
         )
     return held
-
-
-def decon_params_fingerprint() -> str:
-    """A short, deterministic fingerprint of the OMW knobs currently in
-    effect (the DECON_* constants above). `decon_provenance_matches` compares
-    this against what a dataset's on-disk output was actually produced with,
-    so a parameter retune -- not just a PSF swap -- is visible too. Confirmed
-    real gap: locking in `super4` (same PSF file, new alpha/hann/damp) was
-    otherwise indistinguishable from a no-op to every already-deskewed
-    dataset, since `decon_provenance_matches` used to compare only the PSF
-    path.
-    """
-    return (
-        f"a{DECON_WIENER_ALPHA}_o{DECON_OTF_CUM_THRESH}_"
-        f"h{DECON_HANN_WIN_BOUNDS[0]}-{DECON_HANN_WIN_BOUNDS[1]}_d{DECON_DAMP_FACTOR}"
-    )
 
 
 def decon_provenance_matches(registry, dataset_key: str, psf: Path | None) -> bool:
@@ -1221,6 +1144,57 @@ def build_decon_staging_dir(
     return staging_dir
 
 
+def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf: Path | None) -> bool:
+    """Hand-off from the live lane (opym.stream.live), which deconvolves and
+    deskews a streamed acquisition timepoint by timepoint into this dataset's
+    own DSR directory and records the outcome in `.live_status.json` there.
+
+    True (skip submitting) when the live lane is still processing this
+    dataset, or has finished it with the same PSF and decon parameters and
+    every timepoint's frames are on disk; the latter also records deskew as
+    done, so only mip_encode and the viewer export remain. False otherwise
+    (no live run, failed, stale, or incomplete): the normal batch path runs,
+    and its stale-output cleanup removes whatever the live lane left.
+    """
+    if decon_psf is None:
+        return False
+    dsr_dir = dsr_output_dir(zarr_deskew_data_dir(ds, decon_psf), decon_psf)
+    status = read_live_status(dsr_dir)
+    if not status:
+        return False
+    if status.get("state") == "running" and live_status_is_fresh(status):
+        print(f"[backfill] {ds.dataset_key}: live lane still processing it, deferring")
+        return True
+    if status.get("state") != "complete":
+        return False
+    if status.get("decon_psf") != str(decon_psf) or status.get("decon_params") != decon_params_fingerprint():
+        return False
+    n_t = dataset_timepoints(ds)
+    n_c = len(ds.channel_zarr_paths)
+    frames = parse_dsr_frame_names(dsr_dir)
+    if n_t < 1 or not all((c, t) in frames for c in range(n_c) for t in range(n_t)):
+        print(
+            f"[backfill] {ds.dataset_key}: live output incomplete "
+            f"({len(frames)} of {n_t * n_c} frames), reprocessing in batch"
+        )
+        return False
+    registry.set_decon_psf(ds.dataset_key, str(decon_psf))
+    registry.set_decon_params(ds.dataset_key, decon_params_fingerprint())
+    registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(dsr_dir))
+    print(f"[backfill] {ds.dataset_key}: deskewed live ({n_t} timepoints), skipping batch deskew")
+    return True
+
+
+def parse_dsr_frame_names(dsr_dir: Path) -> set[tuple[int, int]]:
+    """(channel, timepoint) of every `<prefix>_C<c>_T<t>.tif` DSR frame."""
+    out = set()
+    for p in Path(dsr_dir).glob("*_C*_T*.tif"):
+        m = re.match(r"^.+_C(\d+)_T(\d+)\.tif$", p.name)
+        if m:
+            out.add((int(m.group(1)), int(m.group(2))))
+    return out
+
+
 def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
     """`submit_deskew_ticket`'s counterpart for `KIND_ZARR_PRECROPPED`
     datasets: no crop stage exists for these (already cropped/channel-split
@@ -1265,6 +1239,8 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
     ):
         return Path(existing["ticket_path"])
+    if _live_lane_owns_deskew(ds, registry, decon_psf):
+        return None
     if _backfill_lane_closed(ds):
         return None
     data_dir = zarr_deskew_data_dir(ds, decon_psf)
@@ -1390,30 +1366,12 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     ticket_path = _admitted_submit(
         input_target=input_dir,
         z_step_um=z_step_um,
-        # Passed explicitly rather than left to the signature default so the
-        # value this pipeline actually relies on shows up in the ticket and
-        # the log. The acquisition writer records no lateral pixel size
-        # (NGFF scale is the placeholder [1,1,1,1], frame_meta says
-        # pixel_size_um: 0.0), so there is nothing to read it from -- 0.136
-        # is the detection path's known value, unchanged from the legacy
-        # TIFF acquisitions.
-        xy_pixel_size=0.136,
         deskew=True,
         rotate=True,
         psf_path=decon_psf,
-        dsr_dir_name=dsr_dir_name_for(decon_psf),
         channel_patterns=channel_patterns,
-        wiener_alpha=DECON_WIENER_ALPHA,
-        otf_cum_thresh=DECON_OTF_CUM_THRESH,
-        hann_win_bounds=DECON_HANN_WIN_BOUNDS,
-        damp_factor=DECON_DAMP_FACTOR,
-        edge_erosion=DECON_EDGE_EROSION,
-        # Without this the ticket carries gpu_decon:false and PetaKit5D runs
-        # the RL iterations on CPU -- both cards sit at 0% while the parfor
-        # pool grinds. The volumes are small in skewed space (~29M voxels),
-        # so this fits many times over in 97 GB.
-        gpu_decon=True,
         save_mip=True,
+        **deskew_decon_kwargs(decon_psf),
         zarr_input=decon_psf is None,
     )
     if ticket_path is None:

@@ -22,6 +22,12 @@ Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/2026
 # volatile and only ever a staging copy of what a session already landed
 # on GPFS via this drain.
 Environment=OPYM_STREAM_STAGE_ROOT=/dev/shm/opym_stream_stage
+# Live lane (opym.stream.live): decon -> deskew/rotate each streamed timepoint
+# as soon as all of its channels have landed, on the GPUs' live queue, ahead
+# of the backfill (the receiver holds LIVE_LEASE.json while it has live work).
+# Needs OPYM_DECON_PSF above. Output lands in the dataset's final DSR dir on
+# GPFS; the backfill takes over from .live_status.json there.
+Environment=OPYM_LIVE_LANE=1
 ExecStart=%h/.local/bin/uv run opym-receive
 Restart=on-failure
 RestartSec=10
