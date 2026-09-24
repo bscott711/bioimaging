@@ -24,6 +24,7 @@ import zarr
 from opym.core import run_processing_job
 from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
+from opym import lanes
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
@@ -555,6 +556,34 @@ def crop_and_convert(
     return zarr_out_dir, tiff_out_dir
 
 
+def backfill_max_inflight() -> int | None:
+    """OPYM_BACKFILL_MAX_INFLIGHT caps how many backfill tickets may be queued
+    or running at once (opym-backfill.service sets it). Unset means no cap, so
+    a manual one-shot run behaves exactly as it always has."""
+    raw = os.environ.get("OPYM_BACKFILL_MAX_INFLIGHT", "").strip()
+    return int(raw) if raw else None
+
+
+def _backfill_lane_closed(ds: LeafDataset) -> bool:
+    """Cheap pre-check, before any cleanup or staging: a live acquisition
+    holds the GPUs, or the backfill already has its cap of tickets queued.
+    The dataset is simply picked up again on a later pass."""
+    if lanes.backfill_admission_open(backfill_max_inflight()):
+        return False
+    print(f"[backfill] {ds.dataset_key}: deferred (live acquisition or backfill queue full)")
+    return True
+
+
+def _admitted_submit(**kwargs) -> Path | None:
+    """`submit_remote_deskew_job` under the backfill admission lock, so parallel
+    Phase A workers can't all see room and overshoot the cap together. None
+    if the lane closed since the pre-check."""
+    with lanes.backfill_admission(backfill_max_inflight()) as admitted:
+        if not admitted:
+            return None
+        return submit_remote_deskew_job(**kwargs)
+
+
 def submit_deskew_ticket(
     ds: LeafDataset, tiff_out_dir: Path, registry: StatusRegistry
 ) -> Path | None:
@@ -596,6 +625,8 @@ def submit_deskew_ticket(
         and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
     ):
         return Path(existing["ticket_path"])
+    if _backfill_lane_closed(ds):
+        return None
     # Past both early returns, so we are definitely submitting -- which means
     # whatever is on disk was made by a *different* configuration than the one
     # we are about to run (or by a run that crashed), and must not be left for
@@ -622,7 +653,7 @@ def submit_deskew_ticket(
     channel_patterns_str = scan_channel_patterns(tiff_out_dir)
     channel_patterns = channel_patterns_str.split(", ") if channel_patterns_str else None
 
-    ticket_path = submit_remote_deskew_job(
+    ticket_path = _admitted_submit(
         input_target=ds.master_file,
         z_step_um=z_step_um,
         deskew=True,
@@ -642,6 +673,8 @@ def submit_deskew_ticket(
         gpu_decon=True,
         save_mip=True,
     )
+    if ticket_path is None:
+        return None
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
@@ -1232,6 +1265,8 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         and decon_provenance_matches(registry, ds.dataset_key, decon_psf)
     ):
         return Path(existing["ticket_path"])
+    if _backfill_lane_closed(ds):
+        return None
     data_dir = zarr_deskew_data_dir(ds, decon_psf)
     # Reaching here means neither early return above fired, so we are about to
     # submit -- and therefore what is on disk was produced by a configuration
@@ -1352,7 +1387,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         # and the staged `<name>.ome.tif`.
         channel_patterns = [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
 
-    ticket_path = submit_remote_deskew_job(
+    ticket_path = _admitted_submit(
         input_target=input_dir,
         z_step_um=z_step_um,
         # Passed explicitly rather than left to the signature default so the
@@ -1381,6 +1416,8 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         save_mip=True,
         zarr_input=decon_psf is None,
     )
+    if ticket_path is None:
+        return None
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))

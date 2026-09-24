@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 
+from opym import lanes
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
@@ -575,6 +576,9 @@ def _finish_pending(
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
 
+_LEASE_POLL_S = 15.0
+
+
 def watch_backfill(
     roots: list[Path],
     *,
@@ -600,7 +604,20 @@ def watch_backfill(
     whole unattended service down with it).
     """
     print(f"[backfill] Watch mode: re-scanning every {watch_interval_s:.0f}s. Ctrl-C to stop.")
+    paused = False
     while True:
+        # Streaming wins: while a live acquisition holds the lease, start no
+        # pass at all (its crop/MIP/GPFS work competes with ingest, and the
+        # servers won't take backfill tickets anyway). See opym.lanes.
+        if lanes.live_lease_active():
+            if not paused:
+                print("[backfill] Live acquisition in progress: pausing until its lease is released.")
+                paused = True
+            time.sleep(_LEASE_POLL_S)
+            continue
+        if paused:
+            print("[backfill] Live lease released: resuming.")
+            paused = False
         start = time.monotonic()
         try:
             run_backfill(

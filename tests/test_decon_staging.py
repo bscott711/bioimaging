@@ -591,3 +591,96 @@ def test_tiff_path_clears_its_own_stale_output_on_a_retune(tmp_path, monkeypatch
     pipeline.submit_deskew_ticket(ds, work, registry)
 
     assert not stale.exists(), "stale Decon/ survived a parameter retune"
+
+
+# --- priority lanes: backfill admission (opym.lanes) ----------------------
+
+
+def _resubmission_scenario(two_channel_store, monkeypatch):
+    """A `done` dataset whose decon params changed, so the next pass would
+    clean its old output and submit (see the test above)."""
+    from backfill import pipeline
+
+    stores, _volumes, tmp_path = two_channel_store
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    monkeypatch.setenv("OPYM_DECON_PSF", str(psf))
+    monkeypatch.setenv("OPYM_ZARR_DEFAULT_Z_STEP", "0.5")
+    monkeypatch.delenv("OPYM_DECON_REPROCESS_LEGACY", raising=False)
+    submitted = []
+
+    def _fake_submit(**kw):
+        submitted.append(kw)
+        ticket = tmp_path / "ticket.json"
+        ticket.write_text("{}")
+        return ticket
+
+    monkeypatch.setattr(pipeline, "submit_remote_deskew_job", _fake_submit)
+    old_output = tmp_path / "decon_stage" / "Decon" / "DSR_decon" / "cell_001_C0_T000.tif"
+    old_output.parent.mkdir(parents=True)
+    old_output.write_bytes(b"old output")
+    ds = SimpleNamespace(
+        kind=KIND_ZARR_PRECROPPED,
+        leaf_dir=tmp_path,
+        raw_dir=tmp_path,
+        dataset_key="k",
+        master_file=tmp_path / "raw.ome.tif",
+        channel_zarr_paths=tuple(stores),
+    )
+    registry = _FakeRegistry(
+        {
+            "k": {
+                "dataset_key": "k",
+                "stage:deskew": {"status": "done", "ticket_path": "old.json"},
+                "decon_psf": str(psf.resolve()),
+                "decon_params": "a0.02_o0.9_h0.8-1.0_d1",
+            }
+        }
+    )
+    return pipeline, ds, registry, submitted, old_output
+
+
+def test_zarr_submit_is_deferred_during_a_live_lease_before_any_cleanup(
+    two_channel_store, monkeypatch
+):
+    from opym import lanes
+
+    pipeline, ds, registry, submitted, old_output = _resubmission_scenario(
+        two_channel_store, monkeypatch
+    )
+    lanes.write_lease(["live-session"])
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    # Deferral happens before the stale-output cleanup, so a dataset waiting out
+    # a live acquisition doesn't lose its old output with nothing queued.
+    assert old_output.exists()
+    assert registry.get_stage("k", "deskew")["status"] == "done"
+
+
+def test_zarr_submit_is_deferred_at_the_inflight_cap(two_channel_store, monkeypatch):
+    from opym import lanes
+
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(
+        two_channel_store, monkeypatch
+    )
+    monkeypatch.setenv("OPYM_BACKFILL_MAX_INFLIGHT", "1")
+    lanes.backfill_queue_dir().mkdir(parents=True)
+    (lanes.backfill_queue_dir() / ".active_other.json").write_text("{}")
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+
+
+def test_zarr_submit_proceeds_under_the_inflight_cap(two_channel_store, monkeypatch):
+    from opym import lanes
+
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(
+        two_channel_store, monkeypatch
+    )
+    monkeypatch.setenv("OPYM_BACKFILL_MAX_INFLIGHT", "2")
+    lanes.backfill_queue_dir().mkdir(parents=True)
+    (lanes.backfill_queue_dir() / "other.json").write_text("{}")
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+    assert len(submitted) == 1
