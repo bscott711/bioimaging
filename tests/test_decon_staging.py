@@ -349,6 +349,11 @@ class _FakeRegistry:
             "status": status, "ticket_path": ticket_path, "output_path": output_path
         }
 
+    def reset_stage(self, key, stage):
+        row = self.get_stage(key, stage)
+        if row:
+            row["status"] = "pending"
+
     def all_datasets(self):
         return list(self.rows.values())
 

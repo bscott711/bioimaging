@@ -13,6 +13,7 @@ before the last dataset has even been cropped.
 
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import shutil
@@ -22,6 +23,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from pathlib import Path
 
 from opym import lanes
+from opym.decon_config import decon_params_fingerprint, ticket_decon_fingerprint
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
@@ -34,7 +36,9 @@ from backfill.mip_movie import (
 )
 from backfill.viewer_export import OUTPUT_FORMATS, channel_label, export_for_viewers
 from backfill.pipeline import (
+    dataset_declared_timepoints,
     dataset_timepoints,
+    decon_provenance_matches,
     detect_rois,
     dsr_output_dir,
     log_grandfathered_decon_datasets,
@@ -82,6 +86,37 @@ def _ticket_resolved(ticket_path: Path) -> tuple[bool, bool]:
     done = (base_dir / "completed" / ticket_path.name).exists()
     failed = (base_dir / "failed" / ticket_path.name).exists()
     return done, failed
+
+
+def _ticket_lost(ticket_path: Path) -> bool:
+    """True when a ticket is in none of the queue's directories, so it can
+    never resolve (e.g. `/dev/shm/petakit_jobs` was cleared by a reboot).
+    A server works on a ticket as `.active_<name>` in the lane it claimed it
+    from, and the supervisor requeues through `.requeue_<name>` (see
+    `opym.local_gpu_worker.requeue_claim`), so all three spellings count as
+    in flight. Re-checks the finished directories last, since a server moves
+    a ticket to `completed/` between our two looks."""
+    base_dir = ticket_path.parent.parent
+    name = ticket_path.name
+    in_flight = any(
+        (base_dir / lane / spelling).exists()
+        for lane in ("queue", "queue_live")
+        for spelling in (name, f".active_{name}", f".requeue_{name}")
+    )
+    return not in_flight and not any(_ticket_resolved(ticket_path))
+
+
+def _finished_ticket_fingerprint(ticket_path: Path) -> tuple[str | None, str | None]:
+    """(psf_path, decon fingerprint) a finished ticket actually ran with,
+    read from its JSON in `completed/`. ("?", "?") if it can't be read, which
+    never matches the current settings, so the dataset is re-submitted
+    rather than accepted on trust."""
+    finished = ticket_path.parent.parent / "completed" / ticket_path.name
+    try:
+        params = json.loads(finished.read_text())["parameters"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return "?", "?"
+    return params.get("psf_path") or None, ticket_decon_fingerprint(params)
 
 
 def _triage_worker(ds: LeafDataset, registry_path: Path) -> tuple[str, str]:
@@ -285,10 +320,13 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
             build_mip_movies_for_dataset(dsr_dir, ds.leaf_dir.name, movies_dir, fps=mip_fps)
             by_channel = find_mip_files(dsr_dir / "MIPs")
             actual_t = max((len(v) for v in by_channel.values()), default=0)
+            # Expected is what the acquisition was configured for, not what
+            # it wrote: an aborted 100-timepoint run should read 2/100, not
+            # the 2/2 it used to.
             registry.set_triage(
                 ds.dataset_key,
                 signal_flag="ok",
-                expected_timepoints=dataset_timepoints(ds),
+                expected_timepoints=dataset_declared_timepoints(ds),
                 actual_timepoints=actual_t,
             )
         elif ds.kind == KIND_ZARR_PRECROPPED:
@@ -301,6 +339,15 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
             # MIP file.
             channel_fsnames = [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
             build_poster_for_zarr_dataset(dsr_dir, channel_fsnames, movies_dir)
+            # Recorded here too so a one-timepoint dataset shows "1/1" -- or
+            # "1/100" when only the first timepoint of a series arrived --
+            # instead of no frame count at all.
+            registry.set_triage(
+                ds.dataset_key,
+                signal_flag="ok",
+                expected_timepoints=dataset_declared_timepoints(ds),
+                actual_timepoints=1,
+            )
         else:
             sanitized_name = sanitize_filename(ds.master_file.name)
             build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
@@ -310,6 +357,39 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
         registry.finish_stage(ds.dataset_key, "mip_encode", status="failed", error=str(e))
         print(f"[backfill] {ds.dataset_key}: mip_encode failed: {e}")
+
+
+def _inflight_tickets(
+    registry: StatusRegistry, dataset_by_key: dict[str, LeafDataset]
+) -> dict[str, Path]:
+    """Every deskew ticket an earlier pass (or process) submitted and never
+    collected, for the datasets discovered this pass. Watch-mode passes don't
+    wait on their tickets, and relying on Phase A to hand them back missed
+    any dataset it short-circuits: 428 finished decon tickets sat uncollected
+    from 9/20, with the dashboard still showing those datasets' old output
+    as done."""
+    return {
+        row["dataset_key"]: Path(row["ticket_path"])
+        for row in registry.pending_deskew_datasets()
+        if row["ticket_path"] and row["dataset_key"] in dataset_by_key
+    }
+
+
+def _needs_triage(ds: LeafDataset, registry: StatusRegistry) -> bool:
+    """Whether Phase 0 should (re)run the signal/frame-count triage.
+
+    KIND_ZARR_PRECROPPED datasets never do (see Phase 0's comment). Neither
+    do datasets already triaged: signal and frame count are properties of
+    the raw data, which a re-submission doesn't change. Gating only on
+    mip_encode, as before, meant every dataset re-queued for new decon
+    settings redid its full-stack projection on every pass -- the
+    starvation 753dd2b fixed.
+    """
+    return (
+        ds.kind != KIND_ZARR_PRECROPPED
+        and not registry.is_stage_done(ds.dataset_key, "mip_encode")
+        and not registry.is_stage_done(ds.dataset_key, "roi_detect")
+    )
 
 
 def _drain_resolved_tickets(
@@ -322,10 +402,19 @@ def _drain_resolved_tickets(
     (marks deskew done/failed +, on success, runs MIP encode) whatever has
     finished, mutating `pending` in place.
     """
+    current_psf = resolve_decon_psf()
+    current = (str(current_psf) if current_psf else None,
+               decon_params_fingerprint() if current_psf else None)
     for dataset_key in list(pending.keys()):
         ticket_path = pending[dataset_key]
         done, failed = _ticket_resolved(ticket_path)
         if not (done or failed):
+            if _ticket_lost(ticket_path):
+                del pending[dataset_key]
+                registry.finish_stage(
+                    dataset_key, "deskew", status="failed",
+                    error=f"ticket lost: {ticket_path.name} is in no petakit_jobs directory",
+                )
             continue
         del pending[dataset_key]
         ds = dataset_by_key[dataset_key]
@@ -334,6 +423,26 @@ def _drain_resolved_tickets(
             registry.finish_stage(
                 dataset_key, "deskew", status="failed",
                 error=f"MATLAB job failed -- see {ticket_path.parent.parent / 'failed' / ticket_path.name}",
+            )
+            continue
+
+        made_with = _finished_ticket_fingerprint(ticket_path)
+        if made_with != current:
+            # Finished, but with settings we've since changed (the 9/20
+            # alpha-0.02 batch, collected only now). Record what it really
+            # ran with -- NOT a NULL fingerprint, which the grandfather
+            # clause would accept forever -- so the next pass's provenance
+            # check re-submits it with the current settings. No MIPs: they
+            # would show output that is about to be replaced.
+            registry.set_decon_psf(dataset_key, made_with[0])
+            registry.set_decon_params(dataset_key, made_with[1])
+            registry.finish_stage(
+                dataset_key, "deskew", status="done", output_path=str(_dsr_dir_for(ds))
+            )
+            registry.reset_stage(dataset_key, "mip_encode")
+            print(
+                f"[backfill] {dataset_key}: finished ticket ran with {made_with[1]}, "
+                f"current is {current[1]} -- superseded, re-queued"
             )
             continue
 
@@ -449,7 +558,10 @@ def run_backfill(
 
     num_workers = workers or max(1, min(8, mp.cpu_count() // 2))
     dataset_by_key = {ds.dataset_key: ds for ds in datasets}
-    pending: dict[str, Path] = {}
+    pending = _inflight_tickets(registry, dataset_by_key)
+    if pending:
+        print(f"[backfill] Collecting {len(pending)} in-flight ticket(s) from earlier passes...")
+        _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
     # KIND_ZARR_PRECROPPED datasets skip triage entirely: detect_rois
     # assumes a raw OME-TIF's dual-camera frame shape, which doesn't apply
@@ -462,16 +574,19 @@ def run_backfill(
     # for Phase A's redundant internal call), but filtering them out of the
     # candidate list up front avoids spinning up a worker at all for the
     # common case (most of the registry, on a steady-state watch pass).
-    triage_candidates = [
-        ds
-        for ds in datasets
-        if ds.kind != KIND_ZARR_PRECROPPED and not registry.is_stage_done(ds.dataset_key, "mip_encode")
-    ]
+    #
+    # So are datasets already triaged (see _needs_triage); their priority
+    # comes from the signal_flag recorded the first time.
+    triage_candidates = [ds for ds in datasets if _needs_triage(ds, registry)]
     print(
         f"[backfill] Phase 0: triaging {len(triage_candidates)} dataset(s) "
         "(signal check + frame count + preview)..."
     )
-    signal_flags: dict[str, str] = {}
+    signal_flags: dict[str, str] = {
+        ds.dataset_key: (registry.get_dataset(ds.dataset_key) or {}).get("signal_flag") or "unknown"
+        for ds in datasets
+        if registry.is_stage_done(ds.dataset_key, "roi_detect")
+    }
     pool = ProcessPoolExecutor(max_workers=num_workers)
     futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
     for future, ds in _as_completed_with_timeout(pool, futures, _TRIAGE_TASK_TIMEOUT_S):
@@ -525,8 +640,10 @@ def run_backfill(
             continue
         if ticket_path_str:
             pending[dataset_key] = Path(ticket_path_str)
-        elif registry.is_stage_done(dataset_key, "deskew") and not registry.is_stage_done(
-            dataset_key, "mip_encode"
+        elif (
+            registry.is_stage_done(dataset_key, "deskew")
+            and not registry.is_stage_done(dataset_key, "mip_encode")
+            and decon_provenance_matches(registry, dataset_key, resolve_decon_psf())
         ):
             # submit_deskew_ticket/submit_zarr_deskew_ticket return None
             # with no ticket to poll whenever deskew is already 'done' --
@@ -536,6 +653,11 @@ def run_backfill(
             # deskew stays 'done' forever and nothing else ever retries
             # mip_encode alone. Catch that case here instead of silently
             # leaving it failed on every subsequent run.
+            #
+            # Only for output made with the current settings. They also
+            # return None when a superseded dataset's re-submit is merely
+            # deferred (in-flight cap, live lease); encoding then would mark
+            # output that is about to be replaced as done.
             _run_mip_encode(dataset_by_key[dataset_key], registry, mip_fps)
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
@@ -562,9 +684,9 @@ def _finish_pending(
     pending. Watch mode must not wait: one pass blocking on its slowest
     ticket (days, for a large decon backlog -- or forever, for a ticket whose
     server died mid-job) stops every later pass from discovering new data.
-    Anything left is safe to abandon here -- the next pass's Phase A hands
-    back the same in-flight ticket from the registry (see
-    `process_zarr_precropped_dataset`'s running-ticket reuse) and drains it.
+    Anything left is safe to abandon here -- the next pass re-collects every
+    `running` deskew ticket from the registry at its start (see
+    `run_backfill`) and drains it.
     """
     _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
     if not wait:
