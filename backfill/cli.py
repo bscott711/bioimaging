@@ -27,10 +27,13 @@ from opym.decon_config import decon_params_fingerprint, ticket_decon_fingerprint
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
 from opym.registry import StatusRegistry
+from opym.ome_zarr_writer import mip_stacks
 from opym.utils import resolve_output_base, sanitize_filename
 
 from backfill.mip_movie import (
     build_mip_movies_for_dataset,
+    build_mip_movies_from_stacks,
+    build_poster_from_frames,
     build_poster_for_zarr_dataset,
     find_mip_files,
 )
@@ -44,6 +47,7 @@ from backfill.pipeline import (
     log_grandfathered_decon_datasets,
     process_crop_and_submit,
     process_zarr_precropped_dataset,
+    processed_store_for,
     resolve_decon_psf,
     zarr_deskew_data_dir,
 )
@@ -312,6 +316,27 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
         # writers of "mip_movies" for this dataset always agree on where it
         # lives regardless of which one ran first.
         movies_dir = resolve_output_base(ds.leaf_dir) / "mip_movies"
+        store = processed_store_for(ds)
+        if store is not None:
+            # The one-format live lane's processed OME-Zarr: MIPs from its
+            # MIP series, and the store itself is the viewer export.
+            stacks = mip_stacks(store)
+            if not stacks:
+                raise FileNotFoundError(f"No complete timepoints in {store}")
+            n = len(next(iter(stacks.values())))
+            if n > 1:
+                build_mip_movies_from_stacks(stacks, ds.leaf_dir.name, movies_dir, fps=mip_fps)
+            else:
+                build_poster_from_frames({f"C{c}": s[0] for c, s in stacks.items()}, movies_dir)
+            registry.set_triage(
+                ds.dataset_key,
+                signal_flag="ok",
+                expected_timepoints=dataset_declared_timepoints(ds),
+                actual_timepoints=n,
+            )
+            registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
+            print(f"[backfill] {ds.dataset_key}: MIP movies from {store.name}; it is the viewer export")
+            return
         if ds.kind == KIND_ZARR_PRECROPPED and dataset_timepoints(ds) > 1:
             # Time series: the mirror was exploded to per-timepoint frames
             # named `<prefix>_C<c>_T<ttt>.zarr` (see build_zarr_pyramid_mirror),

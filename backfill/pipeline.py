@@ -26,7 +26,8 @@ from opym.discovery import LeafDataset, parse_zarr_group_prefix
 from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
 from opym import lanes
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
-from opym.stream.live import live_status_is_fresh, read_live_status
+from opym.ome_zarr_writer import complete_timepoints, is_processed_store, read_progress
+from opym.stream.live import live_status_is_fresh, live_viewer_store, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
@@ -1190,6 +1191,22 @@ def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf:
         return False
     n_t = dataset_timepoints(ds)
     n_c = len(ds.channel_zarr_paths)
+    store = processed_store_for(ds)
+    if store is not None:
+        # The one-format live lane: its processed OME-Zarr is the whole
+        # result (no DSR TIFFs). The GPFS copy's progress lists what's there.
+        have = complete_timepoints(read_progress(store))
+        if n_t < 1 or have[:n_t] != list(range(n_t)):
+            print(
+                f"[backfill] {ds.dataset_key}: live store incomplete "
+                f"({len(have)} of {n_t} timepoints), reprocessing in batch"
+            )
+            return False
+        registry.set_decon_psf(ds.dataset_key, str(decon_psf))
+        registry.set_decon_params(ds.dataset_key, decon_params_fingerprint())
+        registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(store))
+        print(f"[backfill] {ds.dataset_key}: deskewed live into {store.name} ({n_t} timepoints), skipping batch deskew")
+        return True
     frames = parse_dsr_frame_names(dsr_dir)
     if n_t < 1 or not all((c, t) in frames for c in range(n_c) for t in range(n_t)):
         print(
@@ -1202,6 +1219,14 @@ def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf:
     registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(dsr_dir))
     print(f"[backfill] {ds.dataset_key}: deskewed live ({n_t} timepoints), skipping batch deskew")
     return True
+
+
+def processed_store_for(ds: LeafDataset) -> Path | None:
+    """The dataset's processed OME-Zarr if the one-format live lane wrote one
+    (`<leaf>/viewer/<name>_dsr.ome.zarr`, bioformats2raw layout), else None.
+    It then stands in for the DSR TIFF directory everywhere downstream."""
+    store = live_viewer_store(ds.leaf_dir)
+    return store if is_processed_store(store) else None
 
 
 def parse_dsr_frame_names(dsr_dir: Path) -> set[tuple[int, int]]:
