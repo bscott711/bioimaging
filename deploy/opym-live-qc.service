@@ -1,0 +1,26 @@
+[Unit]
+Description=opym-live-qc: judge each streamed timepoint (CORE celldet-live-qc)
+After=network.target
+
+[Service]
+Type=simple
+# Runs from CORE's own venv (torch, OpenCV, ultralytics), not this repo's:
+# opym-receive stays free of all three. It follows the live lane's newest
+# session through <jobs>/live_latest.json, reads the raw-projection sidecars
+# opym-receive writes with OPYM_LIVE_QC=1, and writes verdicts to the
+# dataset's <leaf>/qc/, which opym-receive forwards to the acquisition GUI.
+WorkingDirectory=%h/projects/CORE
+# CPU only: the GPUs belong to the PetaKit5D servers. The YOLO shadow is a
+# ~0.1 s CPU inference per channel per timepoint.
+Environment=CUDA_VISIBLE_DEVICES=
+Environment=OMP_NUM_THREADS=4
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/projects/CORE/.venv/bin/celldet-live-qc --jobs /dev/shm/petakit_jobs
+Restart=on-failure
+RestartSec=10
+# journalctl --user is not readable on this host; see opym-receive.service.
+StandardOutput=append:%h/projects/bioimaging/logs/opym-live-qc.log
+StandardError=append:%h/projects/bioimaging/logs/opym-live-qc.log
+
+[Install]
+WantedBy=default.target

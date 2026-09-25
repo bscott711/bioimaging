@@ -99,7 +99,7 @@ before merging, not just by reading numbers.
 - `backfill/` — reprocessing pipeline for older acquisitions
 - `scripts/` — profiling, MIP export, Zarr/ChimeraX conversion helpers (non-production)
 - `matlab_legacy/` — legacy standalone MATLAB demo scripts
-- `deploy/` — systemd unit for `opym-backfill`
+- `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, and `opym-live-qc` (live per-timepoint QC, runs from `~/projects/CORE`)
 - `scratch/` — throwaway scripts, never promoted into the library
 - `tests/` — pytest suite
 

@@ -28,6 +28,11 @@ Environment=OPYM_STREAM_STAGE_ROOT=/dev/shm/opym_stream_stage
 # Needs OPYM_DECON_PSF above. Output lands in the dataset's final DSR dir on
 # GPFS; the backfill takes over from .live_status.json there.
 Environment=OPYM_LIVE_LANE=1
+# Live QC (opym.stream.qcproj): write projections of every staged raw frame to
+# the dataset's <leaf>/qc/rawproj/ for opym-live-qc.service, and forward its
+# verdicts to clients that ask for them (MSG_QC). Off, or with the QC service
+# stopped, acquisitions stream exactly as before.
+Environment=OPYM_LIVE_QC=1
 ExecStart=%h/.local/bin/uv run opym-receive
 Restart=on-failure
 RestartSec=10
