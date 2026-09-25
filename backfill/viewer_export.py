@@ -33,18 +33,14 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-# DSR resamples onto an isotropic grid whose spacing is the lateral pixel
-# size; see the xyPixelSize passed in submit_zarr_deskew_ticket.
-DSR_VOXEL_UM = 0.136
-
-# napari opens a pyramid lazily; a single 419x1458x392 level per timepoint is
-# slow to pan at full resolution. Three levels cost ~14% extra storage.
-PYRAMID_LEVELS = 3
+# The OME-Zarr layout (voxel size, pyramid, chunking, NGFF attrs) lives in
+# opym.ome_zarr_writer, shared with the live lane, which writes the same store
+# timepoint by timepoint during acquisition; see export_for_viewers.
+from opym import ome_zarr_writer  # noqa: E402
+from opym.ome_zarr_writer import DSR_VOXEL_UM, PYRAMID_LEVELS  # noqa: E402,F401
 
 _FRAME_RE = re.compile(r"^(?P<prefix>.+)_C(?P<c>\d+)_T(?P<t>\d+)\.tif$")
 
-# Distinct, colour-blind-safe-ish emission colours; index = channel number.
-_CHANNEL_COLORS = ("00FF00", "FF3D3D", "00B3FF", "FFC400")
 
 
 OUTPUT_FORMATS = ("tiff", "ome-zarr", "both")
@@ -138,11 +134,8 @@ def stamp_ome_tiff(path: Path, *, voxel_um: float = DSR_VOXEL_UM, channel: str |
 
 
 def _downsample(vol: np.ndarray) -> np.ndarray:
-    """2x block mean on each axis, trimming any odd trailing plane/row/column."""
-    z, y, x = (s - (s % 2) for s in vol.shape)
-    v = vol[:z, :y, :x].astype(np.float32)
-    v = v.reshape(z // 2, 2, y // 2, 2, x // 2, 2).mean(axis=(1, 3, 5))
-    return v.astype(vol.dtype)
+    """2x block mean on each axis; see opym.ome_zarr_writer.downsample2."""
+    return ome_zarr_writer.downsample2(vol)
 
 
 def write_ome_zarr(
@@ -176,61 +169,29 @@ def write_ome_zarr(
     if tmp_path.exists():
         import shutil
         shutil.rmtree(tmp_path)
-    root = zarr.open_group(str(tmp_path), mode="w")
-
-    shapes, arrays = [], []
-    for lvl in range(levels):
-        f = 2 ** lvl
-        shp = (len(times), len(channels), max(1, nz // f), max(1, ny // f), max(1, nx // f))
-        shapes.append(shp)
-        arrays.append(root.create_dataset(
-            str(lvl), shape=shp, dtype=dtype,
-            chunks=(1, 1, min(64, shp[2]), min(256, shp[3]), min(256, shp[4])),
-            dimension_separator="/",
-        ))
-
+    labels = channel_labels or [f"C{c}" for c in channels]
+    ome_zarr_writer.create_store(
+        tmp_path, n_t=len(times), n_c=len(channels), shape_zyx=(nz, ny, nx), dtype=dtype,
+        channel_labels=labels, voxel_um=voxel_um, levels=levels, time_interval_s=time_interval_s,
+    )
     for ti, t in enumerate(times):
         for ci, c in enumerate(channels):
             src = frames.get((c, t))
             if src is None:
                 continue                       # ragged series: leave zeros
-            vol = tifffile.imread(src)
-            for lvl in range(levels):
-                z, y, x = shapes[lvl][2:]
-                arrays[lvl][ti, ci, :z, :y, :x] = vol[:z, :y, :x]
-                if lvl + 1 < levels:
-                    vol = _downsample(vol)
-
-    labels = channel_labels or [f"C{c}" for c in channels]
-    root.attrs["multiscales"] = [{
-        "version": "0.4",
-        "name": out_path.name.removesuffix(".ome.zarr"),
-        "axes": [
-            {"name": "t", "type": "time", "unit": "second"},
-            {"name": "c", "type": "channel"},
-            {"name": "z", "type": "space", "unit": "micrometer"},
-            {"name": "y", "type": "space", "unit": "micrometer"},
-            {"name": "x", "type": "space", "unit": "micrometer"},
-        ],
-        "datasets": [
-            {"path": str(lvl), "coordinateTransformations": [
-                {"type": "scale", "scale": [time_interval_s, 1.0,
-                                            voxel_um * 2 ** lvl,
-                                            voxel_um * 2 ** lvl,
-                                            voxel_um * 2 ** lvl]}]}
-            for lvl in range(levels)
-        ],
-    }]
-    root.attrs["omero"] = {
-        "name": out_path.name,
-        "channels": [
-            {"label": labels[i] if i < len(labels) else f"C{c}",
-             "color": _CHANNEL_COLORS[i % len(_CHANNEL_COLORS)],
-             "active": True,
-             "window": {"start": 0, "end": 300, "min": 0, "max": 65535}}
-            for i, c in enumerate(channels)
-        ],
-    }
+            ome_zarr_writer.write_timepoint(tmp_path, ti, ci, tifffile.imread(src))
+    ome_zarr_writer.write_progress(
+        tmp_path, n_t=len(times), n_c=len(channels),
+        done=[[times.index(t), channels.index(c)] for c, t in frames], state="complete",
+    )
+    # The store is named after its final path, not the .tmp one it was built at.
+    root = zarr.open_group(str(tmp_path), mode="r+")
+    ms = root.attrs["multiscales"]
+    ms[0]["name"] = out_path.name.removesuffix(".ome.zarr")
+    root.attrs["multiscales"] = ms
+    omero = root.attrs["omero"]
+    omero["name"] = out_path.name
+    root.attrs["omero"] = omero
 
     if out_path.exists():
         import shutil
@@ -295,6 +256,11 @@ def export_for_viewers(
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = parse_dsr_frames(dsr_dir, single_names)
     labels = channel_labels or []
+    zarr_out = out_dir / f"{name}_dsr.ome.zarr"
+    # Decided before stamping: stamping rewrites each frame's metadata (never
+    # its pixels), which would otherwise make every frame look newer than the
+    # store and force a needless rebuild.
+    reuse_store = store_is_current(zarr_out, frames)
 
     stamped = 0
     if output_format in ("tiff", "both"):
@@ -306,10 +272,14 @@ def export_for_viewers(
     summary: dict = {"frames": len(frames), "stamped": stamped,
                      "output_format": output_format, "voxel_um": voxel_um}
     if output_format in ("ome-zarr", "both"):
-        zarr_path = write_ome_zarr(dsr_dir, out_dir / f"{name}_dsr.ome.zarr",
-                                   voxel_um=voxel_um, channel_labels=channel_labels,
-                                   single_names=single_names)
-        summary["ome_zarr"] = str(zarr_path)
+        if reuse_store:
+            summary["ome_zarr"] = str(zarr_out)
+            summary["ome_zarr_reused"] = True   # e.g. built live, during acquisition
+        else:
+            zarr_path = write_ome_zarr(dsr_dir, zarr_out,
+                                       voxel_um=voxel_um, channel_labels=channel_labels,
+                                       single_names=single_names)
+            summary["ome_zarr"] = str(zarr_path)
     if output_format in ("tiff", "both"):
         cxc_path = write_chimerax_script(dsr_dir, out_dir / f"{name}_dsr.cxc",
                                          voxel_um=voxel_um, single_names=single_names)
@@ -319,6 +289,38 @@ def export_for_viewers(
 
     (out_dir / "viewer_export.json").write_text(json.dumps(summary, indent=1))
     return summary
+
+
+def store_is_current(zarr_path: Path, frames: dict[tuple[int, int], Path]) -> bool:
+    """Whether an existing OME-Zarr already holds exactly these DSR frames, so
+    it needn't be rebuilt: marked complete, one (t, c) slot per frame and
+    every frame written, the same full-resolution shape, and no frame newer
+    than the store's last progress write (a reprocessed dataset's new frames
+    always force a rebuild). The live lane builds such a store during
+    acquisition; so does a previous run of this export."""
+    import zarr
+
+    progress = ome_zarr_writer.read_progress(zarr_path)
+    if not progress or progress.get("state") != "complete" or not frames:
+        return False
+    channels = sorted({c for c, _ in frames})
+    times = sorted({t for _, t in frames})
+    if progress.get("n_t") != len(times) or progress.get("n_c") != len(channels):
+        return False
+    want = sorted([times.index(t), channels.index(c)] for c, t in frames)
+    if progress.get("done") != want:
+        return False
+    try:
+        level0 = zarr.open_group(str(zarr_path), mode="r")["0"]
+        first = frames[(channels[0], times[0])]
+        with tifffile.TiffFile(first) as tf:
+            frame_shape = tuple(tf.series[0].shape)
+    except (OSError, KeyError, ValueError):
+        return False
+    if tuple(level0.shape[2:]) != frame_shape:
+        return False
+    written = float(progress.get("updated_at", 0))
+    return all(p.stat().st_mtime <= written for p in frames.values())
 
 
 def remove_frames_verified(frames: dict[tuple[int, int], Path], zarr_path: Path) -> int:

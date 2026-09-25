@@ -236,3 +236,74 @@ def test_remove_frames_keeps_tiffs_on_mismatch(tmp_path):
 def test_export_rejects_unknown_format(tmp_path):
     with pytest.raises(ValueError, match="output_format"):
         export_for_viewers(tmp_path, tmp_path / "v", name="X", output_format="png")
+
+
+# --- reusing a store the live lane (or an earlier run) already built -----
+
+
+def _live_built_store(tmp_path, frames_dir, n_t=3, n_c=2, shape=(8, 12, 10)):
+    """What opym.stream.live leaves: the export's own path, filled from the
+    same frames, progress marked complete after the last frame."""
+    import os
+    import time
+
+    from opym import ome_zarr_writer as w
+
+    out_dir = tmp_path / "viewer"
+    store = out_dir / "Cell_002_dsr.ome.zarr"
+    w.create_store(store, n_t=n_t, n_c=n_c, shape_zyx=shape, dtype=np.uint16)
+    for t in range(n_t):
+        for c in range(n_c):
+            f = frames_dir / f"Cell_001_C{c}_T{t:03d}.tif"
+            if f.exists():
+                w.write_timepoint(store, t, c, tifffile.imread(f))
+    done = [[t, c] for t in range(n_t) for c in range(n_c)]
+    old = time.time() - 60
+    for f in frames_dir.glob("*.tif"):
+        os.utime(f, (old, old))
+    w.write_progress(store, n_t=n_t, n_c=n_c, done=done, state="complete")
+    return out_dir, store
+
+
+def test_export_reuses_a_complete_live_store(tmp_path):
+    d = tmp_path / "dsr"
+    d.mkdir()
+    _make_frames(d)
+    out_dir, store = _live_built_store(tmp_path, d)
+    (store / "0" / "live_marker").write_text("untouched")
+
+    summary = export_for_viewers(d, out_dir, name="Cell_002")
+    assert summary.get("ome_zarr_reused") is True
+    assert (store / "0" / "live_marker").exists(), "store was rebuilt"
+
+
+def test_export_rebuilds_when_a_frame_is_newer_than_the_store(tmp_path):
+    d = tmp_path / "dsr"
+    d.mkdir()
+    _make_frames(d)
+    out_dir, store = _live_built_store(tmp_path, d)
+    (store / "0" / "live_marker").write_text("stale")
+    import os
+    import time
+
+    newer = time.time() + 5
+    os.utime(next(d.glob("*_C0_T001.tif")), (newer, newer))
+
+    summary = export_for_viewers(d, out_dir, name="Cell_002")
+    assert not summary.get("ome_zarr_reused")
+    assert not (store / "0" / "live_marker").exists()
+
+
+def test_export_rebuilds_an_aborted_acquisitions_oversized_store(tmp_path):
+    """Live allocates the declared timepoint count; an aborted acquisition has
+    fewer frames, and the export's store must match what exists."""
+    d = tmp_path / "dsr"
+    d.mkdir()
+    _make_frames(d, times=2)
+    out_dir, store = _live_built_store(tmp_path, d, n_t=5)
+
+    summary = export_for_viewers(d, out_dir, name="Cell_002")
+    assert not summary.get("ome_zarr_reused")
+    import zarr
+
+    assert zarr.open_group(str(store), mode="r")["0"].shape[0] == 2
