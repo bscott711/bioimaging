@@ -659,6 +659,10 @@ def submit_deskew_ticket(
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
+    # The MIPs on disk were made from the output this ticket replaces. A
+    # `done` row left behind made opym-dashboard report ~450 re-submitted
+    # datasets as finished, showing their old movies, for days.
+    registry.reset_stage(ds.dataset_key, "mip_encode")
     return ticket_path
 
 
@@ -719,6 +723,21 @@ def channel_store_timepoints(store: Path) -> int:
         return 1
     written = sum(1 for e in pixel_dir.iterdir() if e.name.isdigit() and e.is_dir())
     return min(int(shape[0]), written)
+
+
+def dataset_declared_timepoints(ds: LeafDataset) -> int:
+    """How many timepoints a KIND_ZARR_PRECROPPED acquisition was configured
+    to collect: the `.zarray` T length (see `channel_store_timepoints` for
+    why that is the declared, not the written, count). `max` across
+    channels, since each store is created with the full declared shape.
+    Compared against `dataset_timepoints` so an aborted acquisition shows up
+    as e.g. 2/100 instead of looking complete.
+    """
+    declared = []
+    for store in ds.channel_zarr_paths:
+        shape = _read_zarray(store / _read_ome_zarr_dataset_path(store))["shape"]
+        declared.append(int(shape[0]) if len(shape) >= 4 else 1)
+    return max(declared, default=1)
 
 
 def dataset_timepoints(ds: LeafDataset) -> int:
@@ -1379,6 +1398,10 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     registry.set_decon_psf(ds.dataset_key, str(decon_psf) if decon_psf else None)
     registry.set_decon_params(ds.dataset_key, decon_params_fingerprint() if decon_psf else None)
     registry.start_stage(ds.dataset_key, "deskew", ticket_path=str(ticket_path))
+    # The MIPs on disk were made from the output this ticket replaces. A
+    # `done` row left behind made opym-dashboard report ~450 re-submitted
+    # datasets as finished, showing their old movies, for days.
+    registry.reset_stage(ds.dataset_key, "mip_encode")
     return ticket_path
 
 
@@ -1420,6 +1443,18 @@ def process_crop_and_submit(
         has_legacy_decon=has_legacy_decon,
     )
     try:
+        # Already cropped: go straight to the deskew submit, whose own
+        # provenance check decides whether there is anything to do. Neither
+        # ROI detection nor the crop depends on decon settings, and
+        # `detect_rois` returns early for any dataset whose mip_encode was
+        # ever done -- which hid every re-submission (a decon retune, a
+        # finished ticket to collect) behind "already finished".
+        tiff_out_dir = derive_paths(ds.master_file, OutputFormat.TIFF_SERIES).output_dir
+        if registry.is_stage_done(ds.dataset_key, "crop_tiff") and _output_looks_present(
+            tiff_out_dir
+        ):
+            return submit_deskew_ticket(ds, tiff_out_dir, registry)
+
         top_roi, bot_roi, _signal_flag = detect_rois(ds, registry)
         if top_roi is None and bot_roi is None:
             # `detect_rois` returns this pair only as a "nothing more to do
