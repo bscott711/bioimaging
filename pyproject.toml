@@ -50,6 +50,8 @@ opym = { path = "../opym_local", editable = true }
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    # ome_types.from_xml(validate=True): OME-XML schema checks in opym's tests.
+    "xmlschema>=3",
 ]
 
 [project.scripts]
