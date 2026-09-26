@@ -24,9 +24,10 @@ petakit_jobs/
 *.swo
 *~
 
-# Logs
+# Logs (service logs, benchmark and trace records)
 nohup.out
 *.log
+logs/
 
 # IDEs and Assistants
 .claude/
