@@ -340,6 +340,9 @@ class _FakeRegistry:
     def register_dataset(self, key, **kw):
         self._row(key).update(kw)
 
+    def set_triage(self, key, **kw):
+        self._row(key)["triage"] = kw
+
     def start_stage(self, key, stage, *, ticket_path=None):
         self._row(key)[f"stage:{stage}"] = {"status": "running", "ticket_path": ticket_path}
         self.started.append((key, stage))
@@ -783,3 +786,63 @@ def test_unusable_live_output_falls_back_to_batch(two_channel_store, monkeypatch
     assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
     assert len(submitted) == 1
     assert not dsr.exists(), "the batch path's cleanup removes the partial live output"
+
+
+def _live_processed_store(ds, n_t, n_c, done_t):
+    """What the one-format live lane leaves: a processed OME-Zarr under the
+    dataset's viewer/ (no DSR TIFFs), progress listing `done_t`."""
+    from opym import ome_zarr_writer as w
+    from opym.stream.live import live_viewer_store
+
+    store = live_viewer_store(ds.leaf_dir)
+    w.create_processed_store(store, n_t=n_t, n_c=n_c, shape_zyx=(4, 8, 8))
+    done = [[t, c] for t in done_t for c in range(n_c)]
+    w.write_progress(store, n_t=n_t, n_c=n_c, done=done, state="complete")
+    return store
+
+
+def test_complete_live_processed_store_marks_deskew_done(two_channel_store, monkeypatch):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    _live_output(tmp_path, tmp_path / "psf.tif", "complete", [])  # status, no TIFFs
+    store = _live_processed_store(ds, n_t=3, n_c=2, done_t=range(3))
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    row = registry.get_stage("k", "deskew")
+    assert row["status"] == "done" and row["output_path"] == str(store)
+    assert pipeline.processed_store_for(ds) == store
+
+
+def test_incomplete_live_processed_store_falls_back_to_batch(two_channel_store, monkeypatch):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    _live_output(tmp_path, tmp_path / "psf.tif", "complete", [])
+    _live_processed_store(ds, n_t=3, n_c=2, done_t=range(2))  # T=2 never landed
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+    assert len(submitted) == 1
+
+
+def test_mip_encode_builds_movies_from_the_processed_store(two_channel_store, monkeypatch):
+    """No MIP TIFFs in the one-format pipeline: movies come from the store's
+    MIP series, and the viewer export is skipped (the store is the export)."""
+    import zarr
+
+    from backfill import cli
+
+    pipeline, ds, registry, _submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    store = _live_processed_store(ds, n_t=3, n_c=2, done_t=range(3))
+    mip = zarr.open(str(store / "1" / "0"), mode="r+")
+    mip[:] = np.arange(3 * 2 * 8 * 8, dtype=np.uint16).reshape(mip.shape)
+    exported = []
+    monkeypatch.setattr(cli, "_export_for_viewers", lambda *a: exported.append(a))
+
+    cli._run_mip_encode(ds, registry, mip_fps=4)
+
+    movies = pipeline.resolve_output_base(ds.leaf_dir) / "mip_movies"
+    names = sorted(p.name for p in movies.iterdir())
+    assert f"{ds.leaf_dir.name}_C0.webm" in names and f"{ds.leaf_dir.name}_composite.webm" in names
+    assert registry.get_stage("k", "mip_encode")["status"] == "done"
+    assert registry._row("k")["triage"]["actual_timepoints"] == 3
+    assert exported == []

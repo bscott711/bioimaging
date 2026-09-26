@@ -185,19 +185,24 @@ def build_poster_for_zarr_dataset(
     "one representative static image," just for a different reason.
     """
     mips_dir = dsr_dir / "MIPs"
-    frames_u8: dict[str, np.ndarray] = {}
+    frames: dict[str, np.ndarray] = {}
     for fsname in channel_fsnames:
         mip_path = mips_dir / f"{fsname}_MIP_z.tif"
-        if not mip_path.is_file():
-            continue
-        frame = tifffile.imread(mip_path)
-        frames_u8[fsname] = normalize_for_video(frame)
+        if mip_path.is_file():
+            frames[fsname] = tifffile.imread(mip_path)
 
-    if not frames_u8:
+    if not frames:
         raise FileNotFoundError(
             f"No MIP TIFFs found under {mips_dir} for channels {channel_fsnames}"
         )
+    return build_poster_from_frames(frames, out_dir)
 
+
+def build_poster_from_frames(frames: dict[str, np.ndarray], out_dir: Path) -> Path:
+    """`triage_preview.jpg` from one Z-MIP per channel (blended when there
+    are several) -- the single-timepoint poster, whether the MIPs came from
+    PetaKit5D's TIFFs or a processed OME-Zarr's MIP series."""
+    frames_u8 = {name: normalize_for_video(frame) for name, frame in frames.items()}
     out_path = out_dir / "triage_preview.jpg"
     if len(frames_u8) == 1:
         return encode_poster_image(next(iter(frames_u8.values())), out_path)
@@ -247,11 +252,19 @@ def build_mip_movies_for_dataset(
     by_channel = find_mip_files(mips_dir)
     if not by_channel:
         raise FileNotFoundError(f"No MIP TIFFs found under {mips_dir}")
+    stacks = {c: load_channel_stack(files) for c, files in by_channel.items()}
+    return build_mip_movies_from_stacks(stacks, sanitized_name, out_dir, fps=fps)
 
+
+def build_mip_movies_from_stacks(
+    stacks: dict[int, np.ndarray], sanitized_name: str, out_dir: Path, fps: float = 12.0
+) -> list[Path]:
+    """The movies and posters from per-channel (T, Y, X) Z-MIP stacks,
+    whether read from PetaKit5D's MIP TIFFs or a processed OME-Zarr's MIP
+    series (see `build_mip_movies_for_dataset`)."""
     written: list[Path] = []
     normalized_stacks: dict[int, np.ndarray] = {}
-    for c, files in by_channel.items():
-        stack = load_channel_stack(files)
+    for c, stack in stacks.items():
         stack_u8 = normalize_for_video(stack)
         normalized_stacks[c] = stack_u8
         out_path = out_dir / f"{sanitized_name}_C{c}.webm"
