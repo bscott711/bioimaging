@@ -15,6 +15,12 @@ WorkingDirectory=%h/projects/CORE
 Environment=CUDA_VISIBLE_DEVICES=
 Environment=OMP_NUM_THREADS=4
 Environment=PYTHONUNBUFFERED=1
+# Transparent huge pages: numpy madvises every array over 4 MB for huge pages,
+# and with this host's THP defrag=madvise each first touch of one can stall in
+# direct compaction (measured 2026-09-26: 30 GB of 127 MB arrays took 101 s,
+# single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
+# does the same in-process (opym.live_view.no_hugepage_stalls).
+Environment=NUMPY_MADVISE_HUGEPAGE=0
 ExecStart=%h/projects/CORE/.venv/bin/celldet-live-qc --jobs /dev/shm/petakit_jobs
 Restart=on-failure
 RestartSec=10

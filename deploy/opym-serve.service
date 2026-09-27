@@ -5,6 +5,12 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/bioimaging
+# Transparent huge pages: numpy madvises every array over 4 MB for huge pages,
+# and with this host's THP defrag=madvise each first touch of one can stall in
+# direct compaction (measured 2026-09-26: 30 GB of 127 MB arrays took 101 s,
+# single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
+# does the same in-process (opym.live_view.no_hugepage_stalls).
+Environment=NUMPY_MADVISE_HUGEPAGE=0
 ExecStart=%h/projects/bioimaging/.venv/bin/opym-serve
 # Hang handling (see opym.local_gpu_worker): a claimed ticket whose dataDir
 # has had nothing written for this many minutes is flagged, and with
