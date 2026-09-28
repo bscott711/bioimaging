@@ -13,6 +13,13 @@ WorkingDirectory=%h/projects/bioimaging
 # too -- see opym.stream.receiver's module docstring. Leave unset (or
 # empty) to match a deskew-only backfill (no --decon-psf).
 Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# The backfill's status registry -- MUST match opym-backfill.service's own
+# OPYM_BACKFILL_REGISTRY_PATH. When a new run reuses a name, the receiver
+# moves the earlier run to <folder>/.superseded/ and forgets it here, so the
+# reused name isn't counted as already processed (opym.stream.receiver
+# _supersede). Unset, that earlier run is still moved but stays "done" here,
+# and the backfill would skip the new run.
+Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
 # RAM-disk staging (opt-in, unset = write straight to each session's
 # declared raw_root on GPFS, today's original behavior). Set so PetaKit5D's
 # deskew/decon reads with zero GPFS latency -- see
