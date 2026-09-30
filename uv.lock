@@ -281,7 +281,7 @@ wheels = [
 
 [[package]]
 name = "bioimaging"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "imageio", extra = ["ffmpeg"] },
@@ -2292,7 +2292,7 @@ wheels = [
 
 [[package]]
 name = "opym"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "../opym_local" }
 dependencies = [
     { name = "imagecodecs" },
