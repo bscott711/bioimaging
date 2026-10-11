@@ -26,7 +26,7 @@ from opym import lanes
 from opym.decon_config import decon_params_fingerprint, ticket_decon_fingerprint
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
-from opym.registry import StatusRegistry
+from opym.registry import MAX_STAGE_FAILURES, StatusRegistry
 from opym.ome_zarr_writer import mip_stacks
 from opym.utils import resolve_output_base, sanitize_filename
 
@@ -514,6 +514,43 @@ def _as_completed_with_timeout(
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+# Pool workers come from a fork server, never forked from this process.
+# The backfill runs executor manager threads (and keeps abandoned pools'
+# threads alive, see `_as_completed_with_timeout`), so a plain fork could
+# copy a lock another thread held at that instant; the child then hung for
+# good at exit in concurrent.futures' wakeup lock. By 2026-10-10, 40 such
+# idle children (~200 MB each, 26 GB in the service's cgroup) had piled up
+# at 4-5 a day. The fork server is single-threaded, so its children can't
+# inherit a held lock. It is started at the first pool, after main() has
+# exported OPYM_DECON_PSF etc., so workers still see those.
+_POOL_CONTEXT = mp.get_context("forkserver")
+
+
+def _new_pool(num_workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=num_workers, mp_context=_POOL_CONTEXT)
+
+
+def _without_gave_up(datasets: list[LeafDataset], registry: StatusRegistry) -> list[LeafDataset]:
+    """Drop datasets with a stage that failed MAX_STAGE_FAILURES times in a
+    row. Without this every failed stage was retried on every --watch pass:
+    on 2026-10-10 eleven failures that can never succeed (an unsupported
+    axis order, test acquisitions with no MIPs, a frame-count mismatch)
+    were being retried every 2 minutes and the log had reached 251 MB.
+    Their rows stay `failed`; `--retry-failed` lets them run again. Tickets
+    already in flight for them are still collected."""
+    gave_up = registry.gave_up_datasets()
+    if not gave_up:
+        return datasets
+    kept = [ds for ds in datasets if ds.dataset_key not in gave_up]
+    skipped = len(datasets) - len(kept)
+    if skipped:
+        print(
+            f"[backfill] Skipping {skipped} dataset(s) whose stage failed "
+            f"{MAX_STAGE_FAILURES} times in a row (rerun with --retry-failed to try again)."
+        )
+    return kept
+
+
 # How long a single dataset may occupy a worker before the orchestrator
 # stops waiting on it and moves on -- see `_as_completed_with_timeout`.
 # Triage (Phase 0) is meant to be a cheap signal-presence check, so a much
@@ -588,6 +625,10 @@ def run_backfill(
         print(f"[backfill] Collecting {len(pending)} in-flight ticket(s) from earlier passes...")
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
+    # Everything below (triage, crop/submit, the mip_encode-only retry)
+    # skips datasets the registry has given up on.
+    datasets = _without_gave_up(datasets, registry)
+
     # KIND_ZARR_PRECROPPED datasets skip triage entirely: detect_rois
     # assumes a raw OME-TIF's dual-camera frame shape, which doesn't apply
     # to already-cropped, already-channel-split zarr input. They default to
@@ -612,7 +653,7 @@ def run_backfill(
         for ds in datasets
         if registry.is_stage_done(ds.dataset_key, "roi_detect")
     }
-    pool = ProcessPoolExecutor(max_workers=num_workers)
+    pool = _new_pool(num_workers)
     futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
     for future, ds in _as_completed_with_timeout(pool, futures, _TRIAGE_TASK_TIMEOUT_S):
         if not future.done():
@@ -643,7 +684,7 @@ def run_backfill(
     datasets.sort(key=lambda ds: _SIGNAL_PRIORITY.get(signal_flags.get(ds.dataset_key, "unknown"), 1))
 
     print(f"[backfill] Phase A+B: cropping ({num_workers} workers) and polling deskew/MIP as tickets resolve...")
-    pool = ProcessPoolExecutor(max_workers=num_workers)
+    pool = _new_pool(num_workers)
     futures = {
         pool.submit(_crop_worker, ds, registry_path, legacy_flags[ds.dataset_key]): ds
         for ds in datasets
