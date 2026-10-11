@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `opym-backfill` leaked a hung pool worker a few times a day (40 idle
+  children, 26 GB, by 2026-10-10): forked from the multi-threaded backfill,
+  a worker could inherit a held lock and hang at exit. Pools now use a
+  `forkserver` context.
+- Failures that can never succeed were retried every 2-minute `--watch`
+  pass. A dataset whose stage failed 3 times in a row is now skipped (it
+  stays `failed`); `--retry-failed` clears that. Needs opym's
+  `StatusRegistry.gave_up_datasets`.
+
+### Added
+- `deploy/opym-logrotate.{conf,service,timer}`: hourly user-level log
+  rotation of the service logs at 50 MB.
+
 ## [0.3.0] - 2026-09-30
 
 The first release with a changelog. It rolls up everything since 0.2.0

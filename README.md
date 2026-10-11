@@ -144,11 +144,16 @@ show where it expects this repo to be checked out.
 | `opym-receive.service`   | `opym-receive`                                  | Streaming ingress with RAM-disk staging and the live lane. |
 | `opym-backfill.service`  | `opym-backfill --watch 120 --decon-psf <psf>`   | Continuous backfill with decon on. |
 | `opym-live-qc.service`   | CORE's `celldet-live-qc` (from CORE's own venv)  | Live per-timepoint QC, CPU only. |
+| `opym-logrotate.timer`   | `logrotate` on `opym-logrotate.conf`, hourly    | Rotates the service logs at 50 MB (4 kept, gzipped, `copytruncate`). Enable with `systemctl --user enable --now opym-logrotate.timer`. |
 
 Each unit appends its output to `logs/<unit>.log` in the checkout (git-ignored),
 because `journalctl --user` is not readable on the host. Every unit sets
 `NUMPY_MADVISE_HUGEPAGE=0`: numpy's huge-page madvise on arrays over 4 MB made
 first-touch allocations stall in kernel compaction.
+
+`opym-backfill` stops retrying a dataset once one of its stages has failed
+3 times in a row (it stays `failed` on the dashboard); after fixing the cause,
+run it once with `--retry-failed`.
 
 `opym-receive` and `opym-backfill` must agree on `OPYM_DECON_PSF` and
 `OPYM_BACKFILL_REGISTRY_PATH`; the units set both to the same values.
@@ -233,7 +238,7 @@ before merging, not just by reading numbers.
 - `backfill/` — the backfill pipeline: triage, crop, deskew tickets, MIP movies, viewer export
 - `scripts/` — profiling, MIP export, Zarr/ChimeraX conversion helpers (non-production)
 - `matlab_legacy/` — legacy standalone MATLAB demo scripts
-- `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, and `opym-live-qc` (live per-timepoint QC, runs from `~/projects/CORE`)
+- `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, `opym-live-qc` (live per-timepoint QC, runs from `~/projects/CORE`), and the `opym-logrotate` timer
 - `CHANGELOG.md` — release notes
 - `scratch/` — throwaway scripts, never promoted into the library
 - `tests/` — pytest suite
