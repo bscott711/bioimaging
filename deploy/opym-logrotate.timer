@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly size check of the opym/naparym service logs
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

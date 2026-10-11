@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from backfill.cli import DEFAULT_REGISTRY_PATH, run_backfill, watch_backfill
+from opym.registry import StatusRegistry
 
 DEFAULT_ROOTS = [
     Path("/mmfs1/scratch/jacks.local/microscopy"),
@@ -109,6 +110,15 @@ def main():
             "persistent service (see deploy/opym-backfill.service)."
         ),
     )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help=(
+            "Before starting, let datasets the backfill gave up on (a stage "
+            "failed several times in a row) be retried. Use after fixing the "
+            "cause; they are skipped otherwise."
+        ),
+    )
     args = parser.parse_args()
 
     # Exported rather than threaded through as an argument: the backfill fans
@@ -132,6 +142,11 @@ def main():
             "[backfill] Legacy (unknown-parameter) decon output WILL be "
             "re-deconvolved with the current settings"
         )
+
+    if args.retry_failed and not args.dry_run:
+        with StatusRegistry(args.registry_path) as registry:
+            cleared = registry.clear_gave_up()
+        print(f"[backfill] --retry-failed: {cleared} given-up stage(s) will be retried")
 
     if args.watch is not None:
         watch_backfill(
