@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A zarr acquisition staged while Globus was still copying it produced all-zero decon output, recorded as `done`.
+  Unlanded chunks read back as `fill_value: 0`, so every staged frame was zeros, the eroded mask built from the
+  first frame was empty, and decon multiplied every frame to zero (all 11 root-level `Cell_001`..`Cell_011` on
+  2026-10-14). `_zarr_store_is_ready` now also requires the store to have been idle for 15 minutes
+  (`OPYM_ZARR_SETTLE_SECONDS`), and a staged frame older than the source's newest chunk is rebuilt instead of kept.
+  Datasets already poisoned need their `decon_stage`, `Masks` and `Decon` outputs cleared and a re-run.
+
 ### Added
 - `opym-storage-triage` (`backfill/storage_triage/`): evidence-backed **suggestions** for which data on /mmfs1 and
   /mmfs2 can be deleted. Read-only; never deletes. Inventories every registered dataset (raw / final / provenance /

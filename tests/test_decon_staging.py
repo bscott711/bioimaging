@@ -870,3 +870,77 @@ def test_mip_encode_builds_movies_from_the_processed_store(two_channel_store, mo
     assert registry.get_stage("k", "mip_encode")["status"] == "done"
     assert registry._row("k")["triage"]["actual_timepoints"] == 3
     assert exported == []
+
+
+# ---- a store that is still being transferred must not be staged -------------------------
+# 2026-10-14: every root-level Cell_0xx dataset was staged while Globus was still copying
+# it. Chunks that had not landed read back as fill_value 0, so the staged frames, the
+# eroded mask built from the first of them, and all decon output were zeros, recorded
+# `done`. write_decon_staged_tiff then kept those frames on every later run.
+import os
+import time
+
+from backfill.pipeline import _zarr_store_is_ready, store_newest_mtime
+
+
+def _age(store: Path, seconds: float) -> None:
+    """Make every file and dir in the store look `seconds` old."""
+    t = time.time() - seconds
+    for root, dirs, files in os.walk(store, topdown=False):
+        for name in files + dirs:
+            os.utime(os.path.join(root, name), (t, t))
+    os.utime(store, (t, t))
+
+
+def test_store_written_a_moment_ago_is_not_ready(two_channel_store, monkeypatch):
+    stores, _, _ = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    assert not _zarr_store_is_ready(stores[0])
+
+
+def test_store_idle_past_the_window_is_ready(two_channel_store, monkeypatch):
+    stores, _, _ = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    _age(stores[0], 3600)
+    assert _zarr_store_is_ready(stores[0])
+
+
+def test_staging_refuses_a_store_that_is_still_arriving_and_writes_nothing(two_channel_store, monkeypatch):
+    stores, _, tmp_path = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    with pytest.raises(FileNotFoundError, match="mid-Globus-transfer"):
+        build_decon_staging_dir(stores, tmp_path / "decon_stage", dataset_prefix="cell_001")
+    assert not list((tmp_path / "decon_stage").glob("*.tif"))
+
+
+def test_without_the_window_the_same_store_is_staged_negative_control(two_channel_store):
+    stores, _, tmp_path = two_channel_store          # conftest: window off, the old behaviour
+    out = build_decon_staging_dir(stores, tmp_path / "decon_stage", dataset_prefix="cell_001")
+    assert len(list(out.glob("*.tif"))) == 6
+
+
+def test_frame_staged_before_the_transfer_finished_is_rebuilt(two_channel_store):
+    """A zero frame left behind by an early run is replaced once the store has newer data."""
+    stores, volumes, tmp_path = two_channel_store
+    stage = tmp_path / "decon_stage"
+    build_decon_staging_dir(stores, stage, dataset_prefix="cell_001")
+    poisoned = stage / "cell_001_C0_T000.tif"
+    tifffile.imwrite(poisoned, np.zeros((7, 11, 5), np.uint16))
+    old = store_newest_mtime(stores[0]) - 3600          # staged long before the store's newest chunk
+    os.utime(poisoned, (old, old))
+    build_decon_staging_dir(stores, stage, dataset_prefix="cell_001")
+    got = tifffile.imread(poisoned)
+    np.testing.assert_array_equal(got, orient_zyx_for_decon_tiff(volumes[0][0]))
+
+
+def test_frame_staged_after_the_source_settled_is_kept(two_channel_store):
+    """Re-delivery of an already-staged frame stays a safe no-op (the skip-if-present contract)."""
+    stores, volumes, tmp_path = two_channel_store
+    stage = tmp_path / "decon_stage"
+    build_decon_staging_dir(stores, stage, dataset_prefix="cell_001")
+    marker = stage / "cell_001_C0_T001.tif"
+    tifffile.imwrite(marker, np.full((7, 11, 5), 7, np.uint16))
+    future = store_newest_mtime(stores[0]) + 3600
+    os.utime(marker, (future, future))
+    build_decon_staging_dir(stores, stage, dataset_prefix="cell_001")
+    assert tifffile.imread(marker).max() == 7

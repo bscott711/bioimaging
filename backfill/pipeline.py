@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import time
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -696,7 +697,44 @@ def _zarr_store_is_ready(store: Path) -> bool:
     if not (store / ".zattrs").is_file():
         return False
     dataset_path = _read_ome_zarr_dataset_path(store)
-    return (store / dataset_path).is_dir()
+    if not (store / dataset_path).is_dir():
+        return False
+    return not _store_still_arriving(store)
+
+
+# A store written to within this window may still be mid-transfer. Raw stores
+# declare `fill_value: 0`, so a chunk that has not landed yet reads back as
+# silent zeros: staging one produced all-zero frames (and an all-zero eroded
+# mask, so all-zero decon) for every Cell_0xx dataset on 2026-10-14, recorded
+# as `done`. Override with OPYM_ZARR_SETTLE_SECONDS (tests set 0).
+ZARR_SETTLE_SECONDS_DEFAULT = 900.0
+
+
+def _zarr_settle_seconds() -> float:
+    return float(os.environ.get("OPYM_ZARR_SETTLE_SECONDS", ZARR_SETTLE_SECONDS_DEFAULT))
+
+
+def store_newest_mtime(store: Path) -> float:
+    """Newest modification time among the store's main array dir and its direct
+    entries (one per timepoint on a 4D store). A directory's mtime moves when a
+    child is created, so this tracks a transfer that is still adding timepoints
+    without walking every chunk."""
+    pixel_dir = store / _read_ome_zarr_dataset_path(store)
+    newest = pixel_dir.stat().st_mtime
+    with os.scandir(pixel_dir) as it:
+        for e in it:
+            try:
+                newest = max(newest, e.stat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
+def _store_still_arriving(store: Path, now: float | None = None) -> bool:
+    window = _zarr_settle_seconds()
+    if window <= 0:
+        return False
+    return (now if now is not None else time.time()) - store_newest_mtime(store) < window
 
 
 def _read_zarray(pixel_dir: Path) -> dict:
@@ -1143,6 +1181,7 @@ def build_decon_staging_dir(
 
         n_t = arr.shape[0] if max_timepoints is None else min(arr.shape[0], max_timepoints)
         prefix = dataset_prefix or parse_zarr_group_prefix(store)
+        source_mtime = store_newest_mtime(store)
         if timepoints is not None:
             # An explicit selection (trial runs that need e.g. T023, which
             # `max_timepoints` -- the first N -- cannot express). Asking for a
@@ -1163,6 +1202,7 @@ def build_decon_staging_dir(
                 continue
             dst = staging_dir / f"{prefix}_C{cidx}_T{t:03d}.tif"
             built.add(dst)
+            _drop_stale_staged_frame(dst, source_mtime)
             write_decon_staged_tiff(arr[t], dst)
 
     # Same stale-output hazard the mirror guards against: a staging dir built
@@ -1175,6 +1215,18 @@ def build_decon_staging_dir(
     for entry in staging_dir.glob("*.tif.tmp"):
         entry.unlink()
     return staging_dir
+
+
+def _drop_stale_staged_frame(dst: Path, source_mtime: float) -> None:
+    """`write_decon_staged_tiff` keeps an existing frame (so a half-written TIFF
+    can never be handed back). That also made a frame staged while the store was
+    still being transferred permanent. A frame older than the source's newest
+    chunk was built from less data than exists now: remove it so it is rebuilt."""
+    try:
+        if dst.is_file() and dst.stat().st_mtime < source_mtime:
+            dst.unlink()
+    except OSError:
+        pass
 
 
 def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf: Path | None) -> bool:
