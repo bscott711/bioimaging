@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `opym-storage-triage` (`backfill/storage_triage/`): evidence-backed **suggestions** for which data on /mmfs1 and
+  /mmfs2 can be deleted. Read-only; never deletes. Inventories every registered dataset (raw / final / provenance /
+  intermediate / viewer export / unknown), finds duplicate copies by SHA-256 of the raw files, verifies a dataset's
+  final output is complete before suggesting its intermediates, and applies the rules in
+  `docs/STORAGE_TRIAGE_RULES.md`. Subcommands: `scan`, `hash`, `report`, `verify`.
+
+### Removed
+- `scripts/duplicate_dataset_report.py`: grouped copies by relative path (not content) and called 8 *partial* copies
+  identical. Replaced by the content-based duplicate detection above.
+
 ### Fixed
 - `opym-backfill` leaked a hung pool worker a few times a day (40 idle
   children, 26 GB, by 2026-10-10): forked from the multi-threaded backfill,
