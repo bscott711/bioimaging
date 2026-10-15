@@ -71,3 +71,17 @@ def connect_ro(path: Path) -> sqlite3.Connection | None:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def commit_retry(conn: sqlite3.Connection, attempts: int = 20, delay: float = 5.0) -> None:
+    """Commit, riding out another process (hasher / report) holding the write lock."""
+    import time
+
+    for i in range(attempts):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or i == attempts - 1:
+                raise
+            time.sleep(delay)

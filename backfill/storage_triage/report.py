@@ -24,10 +24,10 @@ def write_report(A: Analysis, out_dir: Path, rows: dict[str, dict], extra: dict)
     with open(out_dir / "suggestions.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["tier", "rule", "filesystem", "bytes", "nfiles", "class", "scope", "path",
-                    "dataset_key", "kept_copy", "evidence", "fingerprint"])
+                    "dataset_key", "kept_copy", "evidence", "fingerprint", "class_bytes"])
         for s in sorted(A.suggestions, key=lambda s: (s.tier, -s.nbytes)):
             w.writerow([s.tier, s.rule, filesystem(s.path), s.nbytes, s.nfiles, s.cls, s.scope, s.path,
-                        s.dataset_key, s.kept_copy, s.evidence, s.fingerprint])
+                        s.dataset_key, s.kept_copy, s.evidence, s.fingerprint, json.dumps(s.class_bytes, sort_keys=True)])
     for tier in TIERS:
         with open(out_dir / f"paths_tier{tier}.txt", "w") as f:
             seen: set[str] = set()

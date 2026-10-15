@@ -343,3 +343,23 @@ def test_verdict_db_marks_redundant_copy(tmp_path, two_copies, monkeypatch):
     write_verdicts(A, tmp_path / "v.sqlite3")
     got = {r[0]: r[1] for r in sqlite3.connect(tmp_path / "v.sqlite3").execute("SELECT dataset_key, rule FROM verdict")}
     assert got[str(b)] == "DUP1" and got[str(a)] == "K0"
+
+
+def test_kept_copy_is_chosen_by_raw_bytes_not_by_how_many_outputs_it_has(tmp_path, two_copies, monkeypatch):
+    """Both copies hold the same acquisition; the mmfs2 copy simply has extra derived
+    output. The lab-share copy must still be the one kept."""
+    a, b = two_copies
+    reg, conn = _mk(tmp_path, [a, b])
+    (b / "processed_ngff/extra.bin").write_bytes(b"0" * 6 * 2**20)
+    scan_all(conn, registry_rows(reg), tmp_path / "mirror", workers=2, refresh=True, log=lambda *_: None)
+    A = _run(tmp_path, reg, conn, monkeypatch=monkeypatch)
+    assert {s.dataset_key for s in A.suggestions if s.rule == "DUP1"} == {str(b)}
+
+
+def test_whole_copy_rows_carry_per_class_bytes(tmp_path, two_copies, monkeypatch):
+    a, b = two_copies
+    reg, conn = _mk(tmp_path, [a, b])
+    A = _run(tmp_path, reg, conn, monkeypatch=monkeypatch)
+    (row,) = [s for s in A.suggestions if s.rule == "DUP1" and s.cls == "mixed"]
+    assert row.class_bytes["raw"] >= 2 * 2**20 and row.class_bytes["final"] > 0
+    assert sum(row.class_bytes.values()) == row.nbytes

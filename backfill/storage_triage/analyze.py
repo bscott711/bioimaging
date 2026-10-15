@@ -37,6 +37,7 @@ class Suggestion:
     kept_copy: str = ""
     paths: list[str] = field(default_factory=list)   # explicit expansion for the paths_*.txt files
     fingerprint: str = ""
+    class_bytes: dict = field(default_factory=dict)  # class -> bytes, for whole-directory rows
 
 
 @dataclass
@@ -148,10 +149,17 @@ def check_finals(
                 "INSERT OR REPLACE INTO final_checks VALUES (?,?,?,?,?)",
                 (k, fp, int(ok), detail, datetime.now(UTC).isoformat()),
             )
+            conn.commit()   # short write transactions: the hasher shares this database
             if i % 25 == 0:
-                conn.commit()
                 log(f"[verify-final] {i}/{len(jobs)}")
     conn.commit()
+
+
+def _by_class(us: list[dict]) -> dict:
+    out: dict[str, int] = defaultdict(int)
+    for u in us:
+        out[u["cls"]] += u["bytes"]
+    return dict(out)
 
 
 def _expand_units(units: list[dict], root: Path) -> list[str]:
@@ -193,6 +201,8 @@ def analyze(
     for u in conn.execute("SELECT * FROM units"):
         units[u["dataset_key"]].append(dict(u))
     total_bytes = {k: sum(u["bytes"] for u in us) for k, us in units.items()}
+    # the "more complete copy" tie-break counts the acquisition, not derived outputs
+    raw_bytes = {k: sum(u["bytes"] for u in us if u["cls"] == RAW) for k, us in units.items()}
 
     # ---- duplicate clusters (content-verified) -------------------------------------------
     raw = dupes.load_raw(conn)
@@ -247,7 +257,8 @@ def analyze(
                 if mf:
                     root = _tree_root("master", r["leaf_dir"], mirror_root, r["master_file"])
                     s = Suggestion(tier, rule, k, str(root), "dir", RAW, sum(f.size for f in mf), len(mf), why, kept,
-                                   [str(root)], f"{len(mf)}:{sum(f.size for f in mf)}")
+                                   [str(root)], f"{len(mf)}:{sum(f.size for f in mf)}",
+                                   {RAW: sum(f.size for f in mf)})
                     A.suggestions.append(s); n += s.nbytes
                 continue
             if not tus:
@@ -257,7 +268,7 @@ def analyze(
                 nb, nf = sum(u["bytes"] for u in tus), sum(u["nfiles"] for u in tus)
                 A.suggestions.append(Suggestion(
                     tier, rule, k, str(root), "dir", "mixed", nb, nf, why, kept, [str(root)],
-                    f"{nf}:{nb}:{max(u['max_mtime_ns'] for u in tus)}"))
+                    f"{nf}:{nb}:{max(u['max_mtime_ns'] for u in tus)}", _by_class(tus)))
                 n += nb
             else:
                 for u in tus:
@@ -267,7 +278,7 @@ def analyze(
                     A.suggestions.append(Suggestion(
                         tier, rule, k, str(root / u["unit"]), "files" if u["unit"].endswith("/*") else "dir",
                         u["cls"], u["bytes"], u["nfiles"], why, kept, pl,
-                        f"{u['nfiles']}:{u['bytes']}:{u['max_mtime_ns']}"))
+                        f"{u['nfiles']}:{u['bytes']}:{u['max_mtime_ns']}", {u["cls"]: u["bytes"]}))
                     n += u["bytes"]
         return n
 
@@ -285,7 +296,7 @@ def analyze(
             fo = final_ok.get(k, (False, ""))[0]
             st = evidence.overall_status(stages.get(k, {}), rows[k]["signal_flag"]) == "done"
             return (0 if v.rule == "P1" else 1, 0 if fo else 1, 0 if st else 1,
-                    -total_bytes.get(k, 0), _root_rank(rows[k]["leaf_dir"]), k)
+                    -raw_bytes.get(k, 0), _root_rank(rows[k]["leaf_dir"]), k)
 
         keeper = sorted(members, key=rank)[0]
         rel = {m: dupes.relation(keeper, m, raw, digest_of) for m in members if m != keeper}
@@ -354,7 +365,8 @@ def analyze(
                     tier, rule, k, str(root / u["unit"]), "files" if u["unit"].endswith("/*") else "dir",
                     u["cls"], u["bytes"], u["nfiles"],
                     f"regenerable {u['cls']}; final output verified: {detail}",
-                    "", _expand_units([u], root), f"{u['nfiles']}:{u['bytes']}:{u['max_mtime_ns']}"))
+                    "", _expand_units([u], root), f"{u['nfiles']}:{u['bytes']}:{u['max_mtime_ns']}",
+                    {u["cls"]: u["bytes"]}))
 
     suggested_roots = {s.dataset_key: 0 for s in A.suggestions}
     for s in A.suggestions:

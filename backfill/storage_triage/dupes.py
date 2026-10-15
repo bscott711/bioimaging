@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -98,8 +99,10 @@ def sha256_file(path: Path) -> str:
 def files_to_hash(raw: dict[str, list[RawFile]], pairs: set[tuple[str, str]]) -> list[RawFile]:
     """Every raw file of every candidate dataset (small siblings such as the
     metadata txt are needed to prove a copy is a *full* twin)."""
-    keys = {k for p in pairs for k in p}
-    return [f for k in sorted(keys) for f in raw[k]]
+    # whole clusters, smallest first: a cluster is only provable once all of its
+    # files are hashed, so finishing small ones early yields suggestions early
+    comps = sorted(clusters(pairs), key=lambda c: (sum(f.size for k in c for f in raw[k]), sorted(c)))
+    return [f for comp in comps for k in sorted(comp) for f in raw[k]]
 
 
 def hash_missing(
@@ -111,7 +114,6 @@ def hash_missing(
         (r[0], r[1], r[2]) for r in conn.execute("SELECT path, size, mtime_ns FROM hashes")
     }
     pending = [(f, p) for f, p in todo if (str(p), f.size, f.mtime_ns) not in cached]
-    pending.sort(key=lambda fp: fp[0].size)
     total = sum(f.size for f, _ in pending)
     log(f"[hash] {len(pending)} files / {total / 2**30:.0f} GiB to hash ({len(todo) - len(pending)} cached)")
     done_bytes = 0
@@ -132,14 +134,21 @@ def hash_missing(
             n += 1
             done_bytes += f.size
             if digest:
-                conn.execute(
-                    "INSERT OR REPLACE INTO hashes VALUES (?,?,?,?,?)",
-                    (str(p), f.size, f.mtime_ns, digest, datetime.now(UTC).isoformat()),
-                )
+                for attempt in range(20):   # ride out another writer (report / final checks)
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO hashes VALUES (?,?,?,?,?)",
+                            (str(p), f.size, f.mtime_ns, digest, datetime.now(UTC).isoformat()),
+                        )
+                        conn.commit()   # never hold the write lock across the next multi-GB read
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if "locked" not in str(exc) or attempt == 19:
+                            raise
+                        time.sleep(5)
             else:
                 log(f"[hash] skip {p}: {err}")
             if n % 50 == 0:
-                conn.commit()
                 log(f"[hash] {n}/{len(pending)} files, {done_bytes / 2**30:.0f}/{total / 2**30:.0f} GiB")
     conn.commit()
     return n
