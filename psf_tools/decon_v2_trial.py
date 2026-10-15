@@ -233,13 +233,17 @@ def gate(cell: str, variant_name: str = "prod") -> dict:
         got = as_zyx(tifffile.imread(dsr_tif(cell, v, c)), ref.shape)
         out[f"C{c}"] = {"shape": list(got.shape), "ref_shape": list(ref.shape), **compare(got, ref)}
         print(f"[gate] {cell} {variant_name} C{c}: {out[f'C{c}']}", flush=True)
+    (cell_dir(cell) / f"gate_{variant_name}.json").write_text(json.dumps(out, indent=1))
     return out
 
 
 def check_shapes(cell: str) -> dict:
     """Every arm's DSR volume must have the production geometry."""
     res = {}
-    for name, v in read_variants(cell).items():
+    mf = cell_dir(cell) / "manifest.json"
+    # every arm ever run on this cell (variants.json holds only the latest run's list)
+    arms = {n: v["spec"] for n, v in json.loads(mf.read_text())["variants"].items()} if mf.is_file() else read_variants(cell)
+    for name, v in arms.items():
         for c in CHANNELS:
             ref_shape = reference_volume(cell, c).shape
             p = dsr_tif(cell, v, c)
