@@ -15,6 +15,10 @@ from pathlib import Path
 _FRAME = re.compile(r"_C(\d+)_T(\d+)\.tif$")
 
 
+class BlankError(ValueError):
+    """The file decodes but holds one constant value everywhere."""
+
+
 def _read_full(path: Path) -> None:
     import tifffile
 
@@ -22,9 +26,12 @@ def _read_full(path: Path) -> None:
         arr = tf.asarray()
     if arr.size == 0:
         raise ValueError("empty array")
+    lo, hi = arr.min(), arr.max()
+    if lo == hi:
+        raise BlankError(f"blank: every voxel is {lo}")
 
 
-CHECK_VERSION = 2  # bump when the checks change: cached results are keyed on it
+CHECK_VERSION = 3  # bump when the checks change: cached results are keyed on it
 
 
 def _verify_single_volumes(rows: list[tuple[str, int]], root: Path, read) -> tuple[bool, str]:
@@ -38,6 +45,8 @@ def _verify_single_volumes(rows: list[tuple[str, int]], root: Path, read) -> tup
     try:
         for r, _s in vols:
             read(root / r)
+    except BlankError as exc:
+        return False, f"{exc} in {r}"
     except Exception as exc:  # noqa: BLE001
         return False, f"unreadable volume: {exc}"
     return True, f"{len(vols)} single volume(s) decoded"
@@ -77,9 +86,26 @@ def verify_tiff_series(
         for c, by_t in frames.items():
             for ti in (0, t - 1):
                 read(root / by_t[ti][0])
+    except BlankError as exc:
+        return False, f"{exc} (channel {c}, timepoint {ti})"
     except Exception as exc:  # noqa: BLE001 - any decode failure = not verified
         return False, f"unreadable frame: {exc}"
     return True, f"{len(frames)} channel(s) x {t} timepoints, first/last frame decoded"
+
+
+MIN_CHUNKS_FOR_UNIFORMITY = 16
+
+
+def _blank_by_chunk_sizes(rows: list[tuple[str, int]]) -> str | None:
+    """Real images never compress to byte-identical chunks. If every chunk of the
+    store (many of them) has the same size, the array is one repeated constant --
+    the live lane and decon both wrote such all-zero stores whose progress file
+    still said `complete`."""
+    meta = (".zarray", ".zattrs", ".zgroup", "zarr.json", ".opym_live.json")
+    sizes = [s for r, s in rows if r.rsplit("/", 1)[-1] not in meta and s > 0]
+    if len(sizes) >= MIN_CHUNKS_FOR_UNIFORMITY and len(set(sizes)) == 1:
+        return f"blank: all {len(sizes)} chunks are the same {sizes[0]} bytes"
+    return None
 
 
 def _verify_live_progress(root: Path, expected_timepoints: int | None) -> tuple[bool, str] | None:
@@ -109,6 +135,9 @@ def verify_zarr(
     have every array's chunk-file count equal its chunk grid (zarr v2 .zarray or v3
     zarr.json) with no empty chunk -- conservative: a sparse store is held, never
     called complete. A file belongs to the deepest array directory containing it."""
+    blank = _blank_by_chunk_sizes(rows)
+    if blank:
+        return False, blank
     live = _verify_live_progress(root, expected_timepoints)
     if live is not None:
         return live
