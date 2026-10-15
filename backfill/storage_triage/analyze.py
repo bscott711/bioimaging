@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from backfill.storage_triage import dupes, evidence
-from backfill.storage_triage.completeness import verify_final
+from backfill.storage_triage.completeness import CHECK_VERSION, verify_final
 from backfill.storage_triage.inventory import (
     FINAL, INTER, MIN_SUGGEST_BYTES, PROV, RAW, UNKNOWN, VIEWER, classify, registry_rows,
 )
@@ -100,7 +100,7 @@ def check_finals(
             "SELECT COUNT(*), COALESCE(SUM(size),0), COALESCE(MAX(mtime_ns),0) FROM files WHERE dataset_key=? AND cls='final'",
             (k,),
         ).fetchone()
-        fp = f"{agg[0]}:{agg[1]}:{agg[2]}"
+        fp = f"v{CHECK_VERSION}:{agg[0]}:{agg[1]}:{agg[2]}"
         old = conn.execute("SELECT fingerprint FROM final_checks WHERE dataset_key=?", (k,)).fetchone()
         if not old or old[0] != fp:
             todo.append((r, fp))
