@@ -111,6 +111,30 @@ def test_max_timepoints_caps_the_stage(two_channel_store):
     ]
 
 
+def test_explicit_timepoints_stage_exactly_those_frames(two_channel_store):
+    """Trial runs need a timepoint that is not the first N (e.g. T023 of a
+    cell): `timepoints=` stages exactly the requested frames, named by their
+    real index, and the pixels are the requested timepoint's -- not T000's."""
+    stores, volumes, tmp_path = two_channel_store
+    out = build_decon_staging_dir(
+        stores, tmp_path / "decon_stage", dataset_prefix="cell_001", timepoints=[2]
+    )
+    assert sorted(p.name for p in out.glob("*.tif")) == ["cell_001_C0_T002.tif", "cell_001_C1_T002.tif"]
+    for c in range(2):
+        got = tifffile.imread(out / f"cell_001_C{c}_T002.tif")
+        np.testing.assert_array_equal(got, orient_zyx_for_decon_tiff(volumes[c][2]))
+        assert not np.array_equal(got, orient_zyx_for_decon_tiff(volumes[c][0]))  # negative control
+
+
+def test_explicit_timepoint_outside_the_store_raises(two_channel_store):
+    """A trial silently staged on the wrong timepoint is worse than none."""
+    stores, _, tmp_path = two_channel_store
+    with pytest.raises(ValueError, match="not in the store"):
+        build_decon_staging_dir(
+            stores, tmp_path / "decon_stage", dataset_prefix="cell_001", timepoints=[99]
+        )
+
+
 def test_staging_is_idempotent_and_prunes_stale_frames(two_channel_store):
     """A rebuild clamped to fewer timepoints must remove the extra frames.
 

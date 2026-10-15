@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1059,6 +1060,7 @@ def build_decon_staging_dir(
     *,
     dataset_prefix: str | None = None,
     max_timepoints: int | None = None,
+    timepoints: Sequence[int] | None = None,
 ) -> Path:
     """Materialize a zarr-precropped acquisition as per-timepoint TIFFs in the
     `(ny, nx, nz)` layout PetaKit5D's deconvolution requires.
@@ -1141,7 +1143,18 @@ def build_decon_staging_dir(
 
         n_t = arr.shape[0] if max_timepoints is None else min(arr.shape[0], max_timepoints)
         prefix = dataset_prefix or parse_zarr_group_prefix(store)
-        for t in range(n_t):
+        if timepoints is not None:
+            # An explicit selection (trial runs that need e.g. T023, which
+            # `max_timepoints` -- the first N -- cannot express). Asking for a
+            # frame the store does not hold is an error, not a skip: a trial
+            # silently staged on the wrong timepoint is worse than none.
+            bad = [t for t in timepoints if not 0 <= t < arr.shape[0] or not (pixel_dir / str(t)).is_dir()]
+            if bad:
+                raise ValueError(f"{store.name}: timepoints {bad} are not in the store")
+            wanted = list(timepoints)
+        else:
+            wanted = range(n_t)
+        for t in wanted:
             if not (pixel_dir / str(t)).is_dir():
                 # A store can declare more timepoints than it wrote (aborted
                 # acquisition); callers clamp, but don't take the dataset
