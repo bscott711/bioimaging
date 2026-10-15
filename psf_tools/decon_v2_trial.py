@@ -80,6 +80,17 @@ def arm_table(psfs: dict[str, str], cell: str | None = None) -> dict[str, dict]:
     for tag, key in (("syn", "syn"), ("synL", "synL"), ("synL_sa0", "synL_sa0")):
         if f"{key}_488" in psfs and f"{key}_561" in psfs:
             arms[tag] = _omw(tag, pad_z=PAD_Z, edge_erosion=0, psf_paths=[psfs[f"{key}_488"], psfs[f"{key}_561"]])
+    if "synL_488" in psfs:
+        # stage 2: the sharper settings with the large PSF (the bead-PSF `a*` arms found them noisier, not clearer)
+        for n, alpha, it in (("synL_a10_i2", 0.10, 2), ("synL_a05_i2", 0.05, 2), ("synL_a05_i5", 0.05, 5),
+                           ("synL_a05_i10", 0.05, 10), ("synL_a02_i5", 0.02, 5), ("synL_a02_i10", 0.02, 10)):
+            arms[n] = _omw(n, alpha=alpha, iters=it, pad_z=PAD_Z, edge_erosion=0, psf_paths=[psfs["synL_488"], psfs["synL_561"]])
+    if "synL_488" in psfs:
+        # plain Richardson-Lucy (PetaKit 'simplified'): positivity-constrained iterations can restore some missing-cone
+        # information that OMW's Wiener back projector cannot -- the direct test of "does decon move the haze"
+        for n, it in (("synL_rl15", 15), ("synL_rl40", 40)):
+            arms[n] = {"name": n, "decon": True, "rl_method": "simplified", "iters": it, "background": None, "pad_z": PAD_Z,
+                       "edge_erosion": 0, "psf_paths": [psfs["synL_488"], psfs["synL_561"]]}
     if cell is not None and "synL_488" in psfs:
         # residual-haze background term: same synthetic large PSF, input with the smooth lower envelope removed
         arms["synL_bg"] = _omw("synL_bg", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_bg")),
@@ -222,13 +233,17 @@ def gate(cell: str, variant_name: str = "prod") -> dict:
         got = as_zyx(tifffile.imread(dsr_tif(cell, v, c)), ref.shape)
         out[f"C{c}"] = {"shape": list(got.shape), "ref_shape": list(ref.shape), **compare(got, ref)}
         print(f"[gate] {cell} {variant_name} C{c}: {out[f'C{c}']}", flush=True)
+    (cell_dir(cell) / f"gate_{variant_name}.json").write_text(json.dumps(out, indent=1))
     return out
 
 
 def check_shapes(cell: str) -> dict:
     """Every arm's DSR volume must have the production geometry."""
     res = {}
-    for name, v in read_variants(cell).items():
+    mf = cell_dir(cell) / "manifest.json"
+    # every arm ever run on this cell (variants.json holds only the latest run's list)
+    arms = {n: v["spec"] for n, v in json.loads(mf.read_text())["variants"].items()} if mf.is_file() else read_variants(cell)
+    for name, v in arms.items():
         for c in CHANNELS:
             ref_shape = reference_volume(cell, c).shape
             p = dsr_tif(cell, v, c)
@@ -250,7 +265,10 @@ COHORT_ID = {"Cell_004": "0928_C004", "Cell_005": "0928_C005", "Cell_001_002": "
 
 def write_manifest(cell: str) -> Path:
     """What the seglab scorer needs: per variant, the DSR TIFF of each channel (and the arm's settings)."""
-    out = {"cell": cell, "cohort_id": COHORT_ID[cell], "t": TRIAL_CELLS[cell], "variants": {}}
+    path = cell_dir(cell) / "manifest.json"
+    # MERGE with what is there: each run rewrites variants.json with only the arms it ran, and earlier arms must stay
+    out = json.loads(path.read_text()) if path.is_file() else {"variants": {}}
+    out.update({"cell": cell, "cohort_id": COHORT_ID[cell], "t": TRIAL_CELLS[cell]})
     for name, v in read_variants(cell).items():
         files = {f"C{c}": str(dsr_tif(cell, v, c)) for c in CHANNELS}
         missing = [f for f in files.values() if not Path(f).is_file()]
