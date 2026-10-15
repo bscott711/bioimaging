@@ -133,8 +133,10 @@ def test_final_wins_over_everything_below_it():
 
 # ---------------------------------------------------------------- completeness
 def _tif(p, v=1):
+    """v=0 writes an all-zero (blank) volume; anything else writes a real-looking ramp."""
     p.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(p, np.full((2, 4, 4), v, np.uint16))
+    data = np.zeros((2, 4, 4), np.uint16) if v == 0 else (np.arange(32, dtype=np.uint16).reshape(2, 4, 4) + v)
+    tifffile.imwrite(p, data)
 
 
 def _series(d, channels=2, times=3):
@@ -409,3 +411,45 @@ def test_live_store_incomplete_is_not_verified(tmp_path, kw, needle):
 def test_live_store_timepoint_mismatch_with_registry_fails(tmp_path):
     ok, detail = verify_zarr(_live_store(tmp_path, n_t=2), tmp_path, 5)
     assert not ok and "registry expects 5" in detail
+
+
+# ---- blank outputs (Cell_009: viewer zarr and DSR_decon were all zeros yet "complete") ----
+def _blank_series(d, channels=1, times=2):
+    for c in range(channels):
+        for t in range(times):
+            _tif(d / f"cell_C{c}_T{t:03d}.tif", v=0)
+    return [(f.name, f.stat().st_size) for f in sorted(d.glob("*.tif"))]
+
+
+def test_all_zero_tiff_series_is_not_verified(tmp_path):
+    ok, detail = verify_tiff_series(_blank_series(tmp_path), tmp_path, 2)
+    assert not ok and "blank" in detail
+
+
+def test_one_blank_channel_among_good_ones_is_not_verified(tmp_path):
+    rows = _series(tmp_path, channels=2, times=2)
+    for t in range(2):
+        _tif(tmp_path / f"cell_C1_T{t:03d}.tif", v=0)
+    ok, detail = verify_tiff_series(rows, tmp_path, 2)
+    assert not ok and "channel 1" in detail
+
+
+def test_single_blank_volume_is_not_verified(tmp_path):
+    _tif(tmp_path / "bead.ome.tif", v=0)
+    ok, detail = verify_tiff_series([("bead.ome.tif", (tmp_path / "bead.ome.tif").stat().st_size)], tmp_path, 1)
+    assert not ok and "blank" in detail
+
+
+def test_live_store_marked_complete_but_all_zero_is_not_verified(tmp_path):
+    (tmp_path / "0").mkdir()
+    (tmp_path / "0/.zarray").write_text(json.dumps({"shape": [4, 4], "chunks": [2, 2]}))
+    rows = _live_store(tmp_path) + [("0/.zarray", 10)] + [(f"0/{i}.{j}", 33936) for i in range(5) for j in range(5)]
+    ok, detail = verify_zarr(rows, tmp_path, 2)
+    assert not ok and "blank" in detail and "33936" in detail
+
+
+def test_real_looking_chunk_sizes_are_not_called_blank(tmp_path):
+    (tmp_path / "0").mkdir()
+    (tmp_path / "0/.zarray").write_text(json.dumps({"shape": [4, 4], "chunks": [2, 2]}))
+    rows = _live_store(tmp_path) + [("0/.zarray", 10)] + [(f"0/{i}.{j}", 700_000 + 31 * (5 * i + j)) for i in range(5) for j in range(5)]
+    assert verify_zarr(rows, tmp_path, 2)[0]
