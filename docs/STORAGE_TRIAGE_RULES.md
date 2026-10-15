@@ -41,7 +41,7 @@ D1/R1 checks and why:
 
 - **source = human.** Accept / Accept-all used to write an auto-detector suggestion into the same table as a click.
 - **no conflicting copy label.** `20260507_..._CSF/cell_1` is *keep* in DataUpload and *delete* in microscopy: one acquisition, two answers.
-- **label newer than the last reprocess.** 56 of 69 labels (37 of 50 deletes) predate the latest deskew; the zarr geometry fix and decon re-enable changed the images. Re-click Delete in the dashboard to re-confirm on the current movie; the next report promotes it.
+- **label newer than the last reprocess.** At the first run (2026-10-15) 56 of 69 labels (37 of 50 deletes) predated the latest deskew; the zarr geometry fix and decon re-enable changed the images. Re-click Delete in the dashboard to re-confirm on the current movie; the next report promotes it.
 - **detector.** `yolo_best.pt` fired on 1 of 5 real OPM datasets (2026-09-21) and scored two real keeps as `no_cell_detected` (2026-10-02). So a detector *miss* is **no evidence either way** and never grounds for a delete; a detector hit with motion contradicts a delete.
 - **bead / PSF.** Only `20260910_averaged_psf` records its source scans (`*.manifest.json`); the other averaged PSFs on disk do not.
 
@@ -55,7 +55,7 @@ Kept copy, in order: protected (seglab references that copy) > verified final ou
 
 ## Intermediates (I1a / I1b, tiers A2 / A3)
 
-Suggested only for K0/P1 datasets whose **final output verifies complete**: per channel, timepoints 0..T-1 contiguous, T equal across channels and equal to the registry's timepoint count, no empty frames, first and last frame of every channel decode (TIFF series); or every array's chunk grid fully present (zarr). A `DSR_decon` that is not the registry's final is never offered.
+Suggested only for K0/P1 datasets whose **final output verifies complete**: per channel, timepoints 0..T-1 contiguous, T equal across channels and equal to the registry's timepoint count, no empty frames, first and last frame of every channel decode (TIFF series); or every array's chunk grid fully present (zarr). A one-volume final (bead/PSF scans, `*.ome.tif`) must be non-empty and decode. A live-lane zarr is checked against its own `.opym_live.json` (`state: complete`, every (t, c) written, `n_t` equal to the registry's count); zarr writers skip all-zero chunks, so a sparse chunk grid does not mean an incomplete store. Any other zarr must have a full chunk grid or it is held. Cached results are keyed on the check version, so changing a check re-verifies everything. A `DSR_decon` that is not the registry's final is never offered.
 
 ## Verify before deleting
 

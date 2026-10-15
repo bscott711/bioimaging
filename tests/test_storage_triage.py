@@ -363,3 +363,49 @@ def test_whole_copy_rows_carry_per_class_bytes(tmp_path, two_copies, monkeypatch
     (row,) = [s for s in A.suggestions if s.rule == "DUP1" and s.cls == "mixed"]
     assert row.class_bytes["raw"] >= 2 * 2**20 and row.class_bytes["final"] > 0
     assert sum(row.class_bytes.values()) == row.nbytes
+
+
+def test_single_volume_final_verifies(tmp_path):
+    _tif(tmp_path / "bead_GFP_488.ome.tif")
+    _tif(tmp_path / "bead_GFP_488.ome_MIP_z.tif")
+    rows = [(f.name, f.stat().st_size) for f in tmp_path.glob("*.tif")]
+    ok, detail = verify_tiff_series(rows, tmp_path, 1)
+    assert ok, detail
+
+
+def test_truncated_single_volume_fails(tmp_path):
+    _tif(tmp_path / "bead.ome.tif")
+    f = tmp_path / "bead.ome.tif"
+    f.write_bytes(f.read_bytes()[:30])
+    ok, detail = verify_tiff_series([("bead.ome.tif", f.stat().st_size)], tmp_path, 1)
+    assert not ok and "unreadable" in detail
+
+
+def _live_store(tmp_path, state="complete", n_t=2, n_c=2, drop=()):
+    done = [[t, c] for t in range(n_t) for c in range(n_c) if (t, c) not in drop]
+    (tmp_path / ".opym_live.json").write_text(json.dumps({"state": state, "n_t": n_t, "n_c": n_c, "done": done}))
+    return [(".opym_live.json", 10)]
+
+
+def test_live_store_complete_even_when_zarr_skipped_empty_chunks(tmp_path):
+    """The 15 live-lane finals: sparse chunk grids are normal (all-zero chunks are not written)."""
+    (tmp_path / "0").mkdir()
+    (tmp_path / "0/.zarray").write_text(json.dumps({"shape": [4, 4], "chunks": [2, 2]}))
+    rows = _live_store(tmp_path) + [("0/.zarray", 10), ("0/0.0", 5)]       # 1 of 4 chunks present
+    assert verify_zarr(rows, tmp_path, 2)[0]
+    (tmp_path / ".opym_live.json").unlink()
+    assert not verify_zarr([("0/.zarray", 10), ("0/0.0", 5)], tmp_path)[0]    # no progress file: held
+
+
+@pytest.mark.parametrize("kw,needle", [
+    (dict(state="writing"), "not complete"),
+    (dict(drop=((1, 1),)), "never written"),
+])
+def test_live_store_incomplete_is_not_verified(tmp_path, kw, needle):
+    ok, detail = verify_zarr(_live_store(tmp_path, **kw), tmp_path, 2)
+    assert not ok and needle in detail
+
+
+def test_live_store_timepoint_mismatch_with_registry_fails(tmp_path):
+    ok, detail = verify_zarr(_live_store(tmp_path, n_t=2), tmp_path, 5)
+    assert not ok and "registry expects 5" in detail

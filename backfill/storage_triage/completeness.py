@@ -24,6 +24,25 @@ def _read_full(path: Path) -> None:
         raise ValueError("empty array")
 
 
+CHECK_VERSION = 2  # bump when the checks change: cached results are keyed on it
+
+
+def _verify_single_volumes(rows: list[tuple[str, int]], root: Path, read) -> tuple[bool, str]:
+    """Bead/PSF scans and other one-volume outputs (`bead_GFP_488.ome.tif`):
+    every non-MIP TIFF in the final dir is non-empty and decodes."""
+    vols = [(r, s) for r, s in rows if "/" not in r and r.endswith((".tif", ".tiff")) and "_MIP_" not in r]
+    if not vols:
+        return False, "no *_C#_T#.tif frames or single-volume TIFF in final dir"
+    if any(s == 0 for _r, s in vols):
+        return False, "zero-length volume"
+    try:
+        for r, _s in vols:
+            read(root / r)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"unreadable volume: {exc}"
+    return True, f"{len(vols)} single volume(s) decoded"
+
+
 def verify_tiff_series(
     rows: list[tuple[str, int]], root: Path, expected_timepoints: int | None, read=_read_full
 ) -> tuple[bool, str]:
@@ -40,7 +59,7 @@ def verify_tiff_series(
         if m:
             frames[int(m.group(1))][int(m.group(2))] = (rel, size)
     if not frames:
-        return False, "no *_C#_T#.tif frames in final dir"
+        return _verify_single_volumes(rows, root, read)
     counts = set()
     for c, by_t in sorted(frames.items()):
         ts = sorted(by_t)
@@ -63,10 +82,36 @@ def verify_tiff_series(
     return True, f"{len(frames)} channel(s) x {t} timepoints, first/last frame decoded"
 
 
-def verify_zarr(rows: list[tuple[str, int]], root: Path) -> tuple[bool, str]:
-    """Every array's chunk-file count must equal its chunk grid (zarr v2 .zarray
-    or v3 zarr.json), and no chunk may be empty. A file belongs to the deepest
-    array directory that contains it (multiscale levels are separate arrays)."""
+def _verify_live_progress(root: Path, expected_timepoints: int | None) -> tuple[bool, str] | None:
+    """The live lane records completeness in `.opym_live.json`: state, n_t, n_c and
+    every (t, c) written. Zarr writers skip all-zero chunks, so the chunk grid
+    cannot prove completeness; this file can."""
+    try:
+        meta = json.loads((root / ".opym_live.json").read_text())
+    except (OSError, ValueError):
+        return None
+    n_t, n_c = meta.get("n_t"), meta.get("n_c")
+    if meta.get("state") != "complete":
+        return False, f"live store state is {meta.get('state')!r}, not complete"
+    want = {(t, c) for t in range(n_t) for c in range(n_c)}
+    done = {tuple(x) for x in meta.get("done", [])}
+    if want - done:
+        return False, f"{len(want - done)} of {len(want)} (t, c) planes never written"
+    if expected_timepoints and n_t != expected_timepoints:
+        return False, f"{n_t} timepoints in store, registry expects {expected_timepoints}"
+    return True, f"live store complete: {n_t} timepoints x {n_c} channels recorded written"
+
+
+def verify_zarr(
+    rows: list[tuple[str, int]], root: Path, expected_timepoints: int | None = None
+) -> tuple[bool, str]:
+    """Live-lane stores are checked against their progress file. Any other zarr must
+    have every array's chunk-file count equal its chunk grid (zarr v2 .zarray or v3
+    zarr.json) with no empty chunk -- conservative: a sparse store is held, never
+    called complete. A file belongs to the deepest array directory containing it."""
+    live = _verify_live_progress(root, expected_timepoints)
+    if live is not None:
+        return live
     meta_names = (".zarray", ".zattrs", ".zgroup", "zarr.json")
     arrays: dict[str, dict] = {}
     for rel, _s in rows:
@@ -108,5 +153,5 @@ def verify_final(
     if not rows:
         return False, "no final files on disk"
     if final_is_zarr:
-        return verify_zarr(rows, final_root)
+        return verify_zarr(rows, final_root, expected_timepoints)
     return verify_tiff_series(rows, final_root, expected_timepoints, read)
