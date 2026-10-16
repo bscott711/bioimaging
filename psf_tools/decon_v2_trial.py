@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +41,7 @@ from opym.decon_config import (
     XY_PIXEL_SIZE_UM,
 )
 
-WORKSPACE = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/decon_sweeps/20261015_decon_v2")
+WORKSPACE = Path(os.environ.get("DECON_V2_WORKSPACE", "/mmfs2/scratch/SDSMT.LOCAL/bscott/decon_sweeps/20261015_decon_v2"))
 DATASET = Path(
     "/mmfs1/scratch/jacks.local/microscopy/20260928-SVO-memNG-mScar2xFYVE-FLM-Macropinocytosis"
 )
@@ -50,6 +51,53 @@ TRIAL_CELLS = {"Cell_004": 23, "Cell_005": 0, "Cell_001_002": 0}
 CHANNEL_PATTERNS = ["_C0_T", "_C1_T"]
 CHANNELS = (0, 1)  # C0 = GFP 488 membrane, C1 = mScarlet 561 puncta
 Z_STEP_UM = 0.5
+COHORT_ID = {"Cell_004": "0928_C004", "Cell_005": "0928_C005", "Cell_001_002": "0928_C001_002"}
+
+
+@dataclass(frozen=True)
+class CellSpec:
+    """Everything cell-specific the trial needs. The three 0928 trial cells are built in; ``load_cohort`` adds the segmentation
+    cohort (a table written by ``seglab dv2-cells``), keyed by cohort id, which is also the workspace directory name."""
+    t: int                              # the timepoint the segmentation masks were drawn on
+    cohort_id: str
+    stores: tuple                       # raw OME-zarr per channel, C0 first
+    z_step_um: float                    # scan step of the raw stack
+    reference: dict | None = None       # the stored deskewed volume of t (None = the 0928 viewer zarr): what the prod arm must reproduce
+    channels: tuple = (0, 1)
+    extra_ts: tuple = ()                # more timepoints staged beside t (stability)
+    interp: str | None = None           # DSR interpolation that reproduces the stored volume ('cubic' for datasets processed before
+                                        # 2026-09-24); None = the pipeline's current default (linear), no override
+
+
+SPECS: dict[str, CellSpec] = {
+    c: CellSpec(t, COHORT_ID[c], tuple(DATASET / f"{c}_{lab}.ome.zarr" for lab in ("GFP_488", "mScarlet_561")), Z_STEP_UM)
+    for c, t in TRIAL_CELLS.items()
+}
+
+
+def spec(cell: str) -> CellSpec:
+    if cell not in SPECS:
+        raise SystemExit(f"unknown cell {cell!r}; have {', '.join(sorted(SPECS))} (--cohort FILE adds the segmentation cohort)")
+    return SPECS[cell]
+
+
+def load_cohort(path: str | Path, channels: tuple = (0,)) -> list[str]:
+    """Add the cells of a ``seglab dv2-cells`` table to ``SPECS`` (membrane channel only by default: the other channel is neither
+    segmented nor needed, and N2V on it is the most expensive step). Returns the cohort ids. ``TRIAL_CELLS`` is left alone: the
+    dark-map pooling reads it and must keep to the three trial cells."""
+    from opym.metadata import parse_zarr_z_step_from_store
+
+    table = json.loads(Path(path).read_text())
+    labs = ("GFP_488", "mScarlet_561")
+    for cid, c in table.items():
+        if c["membrane_ch"] != 0:
+            raise SystemExit(f"{cid}: membrane channel {c['membrane_ch']}; the cohort runner handles C0 only")
+        stores = tuple(Path(c["raw"][labs[i]]) for i in channels)
+        z = c["z_step_um"] or parse_zarr_z_step_from_store(stores[0])
+        if not z:
+            raise SystemExit(f"{cid}: no z step in the table and none in {stores[0]}")
+        SPECS[cid] = CellSpec(int(c["t"]), cid, stores, float(z), c["reference"], tuple(channels))
+    return list(table)
 DZ_PSF_UM = 0.1
 SKEW_DEG = 60.0
 PAD_Z = 24  # >= half the decimated PSF support (17 planes bead; 33 planes large synthetic)
@@ -149,6 +197,14 @@ def arm_table(psfs: dict[str, str], cell: str | None = None) -> dict[str, dict]:
             for um in (3.0, *FLOOR_FOOTPRINTS_UM):  # the floor itself through the plain DSR, per footprint
                 n = "floor_onlyv2" if um == 3.0 else f"floor_onlyv2o{um:g}"
                 arms[n] = {"name": n, "decon": False, "stage_dir": str(stage_dir(cell, floor_dir_name("stage", um, view=True)))}
+    # control for datasets processed before the 2026-09-24 switch to linear interpolation: production's settings with cubic
+    arms["prod_cubic"] = _omw("prod_cubic", interp_method="cubic")
+    if cell in SPECS and SPECS[cell].interp:
+        # every arm but the `prod` control resamples like the stored volume did (the control stays at the current default, so the
+        # gate can tell which interpolation matches)
+        for n, v in arms.items():
+            if n not in ("prod", "prod_cubic"):
+                v["interp_method"] = SPECS[cell].interp
     return arms
 
 
@@ -168,9 +224,8 @@ def load_psfs() -> dict[str, str]:
 def stage_cell(cell: str) -> Path:
     from backfill.pipeline import build_decon_staging_dir
 
-    t = TRIAL_CELLS[cell]
-    stores = tuple(DATASET / f"{cell}_{lab}.ome.zarr" for lab in ("GFP_488", "mScarlet_561"))
-    return build_decon_staging_dir(stores, stage_dir(cell), dataset_prefix=cell, timepoints=[t])
+    sp = spec(cell)
+    return build_decon_staging_dir(sp.stores, stage_dir(cell), dataset_prefix=cell, timepoints=sorted({sp.t, *sp.extra_ts}))
 
 
 def floor_stage(cell: str, src: str = "stage", open_um: float = 3.0, smooth_um: float = 3.0, view: bool = False) -> Path:
@@ -184,7 +239,7 @@ def floor_stage(cell: str, src: str = "stage", open_um: float = 3.0, smooth_um: 
         raise SystemExit(f"{cell}: no TIFFs in {src}/ (stage / n2v_denoise / stage-dark first)")
     out = stage_dir(cell, floor_dir_name(src, open_um, view))
     out.mkdir(parents=True, exist_ok=True)
-    kw = dict(axes=STAGED_AXES, xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um, smooth_um=smooth_um)
+    kw = dict(axes=STAGED_AXES, xy_um=XY_PIXEL_SIZE_UM, dz_um=spec(cell).z_step_um, open_um=open_um, smooth_um=smooth_um)
     for f in files:
         vol = tifffile.imread(f)
         if view:
@@ -255,13 +310,15 @@ def make_variants(cell: str, arm_names: list[str], extra: dict[str, dict] | None
         v = dict(arms[a])
         if v.get("stage_dir") is None:
             v.pop("stage_dir", None)
+        if v.get("psf_paths"):
+            v["psf_paths"] = v["psf_paths"][:len(spec(cell).channels)]   # one PSF per channel pattern (the driver checks)
         variants.append(v)
     cfg = {
         "stage_dir": str(stage_dir(cell)),
         "psf_path": str(BEAD_PSF),
-        "channel_patterns": CHANNEL_PATTERNS,
+        "channel_patterns": CHANNEL_PATTERNS[:len(spec(cell).channels)],
         "xy_pixel_size": XY_PIXEL_SIZE_UM,
-        "z_step_um": Z_STEP_UM,
+        "z_step_um": spec(cell).z_step_um,
         "dz_psf": DZ_PSF_UM,
         "skew_angle_deg": SKEW_DEG,
         "edge_erosion": DECON_EDGE_EROSION,
@@ -287,9 +344,9 @@ def run_matlab(variants_json: Path, log: Path, gpu: str = "1") -> int:
         return subprocess.call(["bash", "-lc", cmd], env=env, stdout=fh, stderr=subprocess.STDOUT)
 
 
-def dsr_tif(cell: str, variant: dict, channel: int) -> Path:
-    """Where the driver puts a variant's lab-frame volume (mirrors its layout)."""
-    t = TRIAL_CELLS[cell]
+def dsr_tif(cell: str, variant: dict, channel: int, t: int | None = None) -> Path:
+    """Where the driver puts a variant's lab-frame volume (mirrors its layout); ``t`` defaults to the segmentation timepoint."""
+    t = spec(cell).t if t is None else t
     name = variant["name"]
     fn = f"{cell}_C{channel}_T{t:03d}.tif"
     stg = Path(variant.get("stage_dir") or stage_dir(cell))
@@ -306,10 +363,18 @@ def read_variants(cell: str) -> dict[str, dict]:
 
 
 def reference_volume(cell: str, channel: int) -> np.ndarray:
-    """Production's volume for this cell/timepoint/channel: level 0 of the
-    viewer zarr the segmentation was drawn on, as (z, y, x)."""
-    z = zarr.open(str(DATASET / cell / "viewer" / f"{cell}_dsr.ome.zarr"), mode="r")
-    return np.asarray(z["0/0"][TRIAL_CELLS[cell], channel])
+    """The STORED deskewed volume of this cell/timepoint/channel, as (z, y, x): the 0928 viewer zarr the segmentation was drawn on, or
+    (cohort cells) the reference named in the cell's spec: a DSR tif or a processed zarr."""
+    sp = spec(cell)
+    ref = sp.reference
+    if ref is None:
+        z = zarr.open(str(DATASET / cell / "viewer" / f"{cell}_dsr.ome.zarr"), mode="r")
+        return np.asarray(z["0/0"][sp.t, channel])
+    if ref["kind"] == "zarr":
+        return np.asarray(zarr.open(ref["path"], mode="r")["0/0"][ref["t"], ref.get("c", channel)])
+    if channel != 0:
+        raise SystemExit(f"{cell}: the reference table holds channel 0 only")
+    return tifffile.imread(ref["path"])
 
 
 def as_zyx(tif: np.ndarray, like_shape: tuple[int, ...]) -> np.ndarray:
@@ -334,7 +399,7 @@ def compare(a: np.ndarray, b: np.ndarray) -> dict:
 def gate(cell: str, variant_name: str = "prod") -> dict:
     v = read_variants(cell)[variant_name]
     out = {}
-    for c in CHANNELS:
+    for c in spec(cell).channels:
         ref = reference_volume(cell, c)
         got = as_zyx(tifffile.imread(dsr_tif(cell, v, c)), ref.shape)
         out[f"C{c}"] = {"shape": list(got.shape), "ref_shape": list(ref.shape), **compare(got, ref)}
@@ -348,7 +413,7 @@ def identity_check(cell: str) -> dict:
     must be equal. Writes <cell>/identity_bg100.json with the far-field median of the production volume (0 = the offset is gone)."""
     arms = read_variants(cell)
     out = {}
-    for c in CHANNELS:
+    for c in spec(cell).channels:
         a = tifffile.imread(dsr_tif(cell, arms["prod"], c))
         b = tifffile.imread(dsr_tif(cell, arms["prod_bg100_check"], c))
         out[f"C{c}"] = {"identical": bool(np.array_equal(a, b)), "max_abs_diff": float(np.abs(a.astype(np.int64) - b).max()),
@@ -365,7 +430,7 @@ def check_shapes(cell: str) -> dict:
     # every arm ever run on this cell (variants.json holds only the latest run's list)
     arms = {n: v["spec"] for n, v in json.loads(mf.read_text())["variants"].items()} if mf.is_file() else read_variants(cell)
     for name, v in arms.items():
-        for c in CHANNELS:
+        for c in spec(cell).channels:
             ref_shape = reference_volume(cell, c).shape
             p = dsr_tif(cell, v, c)
             if not p.is_file():
@@ -381,17 +446,14 @@ def check_shapes(cell: str) -> dict:
     return res
 
 
-COHORT_ID = {"Cell_004": "0928_C004", "Cell_005": "0928_C005", "Cell_001_002": "0928_C001_002"}
-
-
 def write_manifest(cell: str) -> Path:
     """What the seglab scorer needs: per variant, the DSR TIFF of each channel (and the arm's settings)."""
     path = cell_dir(cell) / "manifest.json"
     # MERGE with what is there: each run rewrites variants.json with only the arms it ran, and earlier arms must stay
     out = json.loads(path.read_text()) if path.is_file() else {"variants": {}}
-    out.update({"cell": cell, "cohort_id": COHORT_ID[cell], "t": TRIAL_CELLS[cell]})
+    out.update({"cell": cell, "cohort_id": spec(cell).cohort_id, "t": spec(cell).t})
     for name, v in read_variants(cell).items():
-        files = {f"C{c}": str(dsr_tif(cell, v, c)) for c in CHANNELS}
+        files = {f"C{c}": str(dsr_tif(cell, v, c)) for c in spec(cell).channels}
         missing = [f for f in files.values() if not Path(f).is_file()]
         if missing:
             print(f"[manifest] {cell}/{name}: not on disk yet, left out ({missing[0]})")
@@ -406,13 +468,21 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["stage", "stage-bg", "stage-floor", "stage-n2v-bg", "stage-dark", "dark-map", "variants", "run",
                                     "gate", "check-shapes", "manifest", "identity"])
-    ap.add_argument("--cell", required=True, choices=sorted(TRIAL_CELLS))
+    ap.add_argument("--cell", required=True, help="a 0928 trial cell, or a cohort id with --cohort")
+    ap.add_argument("--cohort", type=Path, default=None, help="a `seglab dv2-cells` table: adds the segmentation cohort (C0 only)")
+    ap.add_argument("--ts", default="", help="stage these timepoints beside the segmentation one (comma-separated)")
     ap.add_argument("--arms", nargs="*", default=["nodecon", "prod", "pad"])
     ap.add_argument("--variant", default="prod")
     ap.add_argument("--gpu", default="1")
     ap.add_argument("--src", default=None, help="stage-bg / stage-n2v-bg / stage-floor: the staged directory to take the floor of")
     ap.add_argument("--open-um", type=float, default=3.0, help="grey-opening footprint of the haze floor")
     a = ap.parse_args(argv)
+    if a.cohort:
+        load_cohort(a.cohort)
+    sp0 = spec(a.cell)
+    if a.ts:
+        SPECS[a.cell] = CellSpec(sp0.t, sp0.cohort_id, sp0.stores, sp0.z_step_um, sp0.reference, sp0.channels,
+                                 tuple(int(i) for i in a.ts.split(",")), sp0.interp)
     cell_dir(a.cell).mkdir(parents=True, exist_ok=True)
     if a.cmd == "stage":
         print(stage_cell(a.cell))
