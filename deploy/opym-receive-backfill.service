@@ -1,0 +1,33 @@
+[Unit]
+Description=opym-receive-backfill: SSH backfill of finished acquisitions (opym.stream.backfill_receiver)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/bioimaging
+# Where backfilled stores may land: the directory a Globus transfer lands sessions in. The receiver
+# refuses any other destination, so a confused or hostile sender cannot write elsewhere.
+Environment=OPYM_BACKFILL_RAW_ROOTS=/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload
+# Loopback only: the acquisition PC reaches it through an SSH tunnel to this port
+# (ssh -N -L 5556:127.0.0.1:5556 <user>@argus.sdstate.edu). The live stream keeps its own port (5555) and
+# its own service; nothing here shares state with it.
+Environment=OPYM_BACKFILL_BIND=tcp://127.0.0.1:5556
+# A store written to this recently by something else (a Globus copy, the live stream) is left alone.
+Environment=OPYM_BACKFILL_SETTLE_SECONDS=900
+# Holds every volume write while a live acquisition holds the lease (opym.lanes), so backfill never
+# competes with a live session for Argus's disk. Must be the same jobs dir the live receiver uses.
+Environment=PETAKIT_JOBS_DIR=/dev/shm/petakit_jobs
+Environment=PYTHONUNBUFFERED=1
+# Lowest priority: this is bulk work that can always wait.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+ExecStart=%h/.local/bin/uv run opym-receive-backfill
+Restart=on-failure
+RestartSec=10
+# journalctl --user is not readable on this host (see opym-receive.service).
+StandardOutput=append:%h/projects/bioimaging/logs/opym-receive-backfill.log
+StandardError=append:%h/projects/bioimaging/logs/opym-receive-backfill.log
+
+[Install]
+WantedBy=default.target

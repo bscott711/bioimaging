@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `opym-receive-backfill` / `opym-backfill-send` entry points and `deploy/opym-receive-backfill.service`: the SSH
+  backfill of finished acquisitions from the acquisition PC (see opym_local `docs/SSH_BACKFILL.md`). A store the
+  backfill finished carries `.opym_complete.json`; `_zarr_store_is_ready` treats it as complete without waiting out
+  the idle window. The service is not enabled by default.
+
 ### Fixed
 - A zarr acquisition staged while Globus was still copying it produced all-zero decon output, recorded as `done`.
   Unlanded chunks read back as `fill_value: 0`, so every staged frame was zeros, the eroded mask built from the
