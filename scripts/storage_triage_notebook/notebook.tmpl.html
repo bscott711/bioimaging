@@ -1,0 +1,340 @@
+<title>Storage Triage Notebook</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column of ruled sections under a sticky tab bar; wide tables scroll inside their own box. */
+:root {
+  --bg: #f4f7f6; --surface: #ffffff; --ink: #11201f; --ink2: #475856; --ink3: #6c7d7b; --line: #d6e0de; --line2: #e6edeb;
+  --keep: #2a6fdb; --sug: #c0398b; --rev: #c98500; --neutral: #9aabaa;
+  --keep-bg: #e3edfc; --sug-bg: #f8e4f0; --rev-bg: #f8eed6;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --font-body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1717; --surface: #152122; --ink: #e8f0ee; --ink2: #a4b6b3; --ink3: #7f918f; --line: #2a3b3a; --line2: #213130;
+  --keep: #4a8cf0; --sug: #e05aa8; --rev: #e5ad3a; --neutral: #5b6e6c;
+  --keep-bg: #172b4a; --sug-bg: #44203a; --rev-bg: #3d3014; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0e1717; --surface: #152122; --ink: #e8f0ee; --ink2: #a4b6b3; --ink3: #7f918f; --line: #2a3b3a; --line2: #213130;
+  --keep: #4a8cf0; --sug: #e05aa8; --rev: #e5ad3a; --neutral: #5b6e6c;
+  --keep-bg: #172b4a; --sug-bg: #44203a; --rev-bg: #3d3014; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--font-body); margin: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 56px; }
+.wrap { max-width: 1040px; margin: 0 auto; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.08; }
+h2 { font-size: 22px; line-height: 1.2; margin-bottom: 4px; }
+h3 { font-size: 16px; line-height: 1.3; }
+p { margin: 0; max-width: 68ch; }
+.mono, td.num, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink2); } .faint { color: var(--ink3); }
+header.top { padding-block: 28px 14px; display: grid; gap: 10px; }
+.eyebrow { font: 500 12px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); }
+.lede { color: var(--ink2); font-size: 16px; }
+nav.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
+  display: flex; gap: 4px; overflow-x: auto; margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding-inline: max(16px, env(safe-area-inset-left, 0px)); }
+nav.tabs a { color: var(--ink2); text-decoration: none; padding: 12px 14px; font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+nav.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); }
+a:focus-visible, button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--keep); outline-offset: 2px; }
+section.panel { display: none; padding-top: 22px; gap: 28px; } section.panel.on { display: grid; }
+.sub { display: grid; gap: 12px; }
+.banner { border: 1px solid var(--line); background: var(--surface); border-left: 4px solid var(--rev); padding: 10px 14px; border-radius: 6px; color: var(--ink2); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); width: max-content; }
+.seg button { font: 500 14px var(--font-body); border: 0; background: transparent; color: var(--ink2); padding: 8px 18px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.stat .n { font: 700 28px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--ink2); font-size: 13px; }
+/* bars */
+.bars { display: grid; gap: 14px; }
+.bar-row { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; align-items: center; }
+.bar-row .name { font-size: 14px; } .bar-row .name small { display: block; color: var(--ink3); font-size: 12px; }
+.track { display: flex; gap: 2px; height: 16px; min-width: 0; align-items: center; }
+.seg-bar { height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; cursor: default; }
+.seg-bar:first-child { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+.val { margin-left: 8px; font: 500 12.5px var(--font-mono); color: var(--ink2); white-space: nowrap; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink2); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+.budget { position: relative; display: grid; gap: 12px; padding-top: 8px; }
+.budget .axis { position: relative; height: 26px; border-bottom: 1px solid var(--line); margin-left: 190px; }
+.budget .tick { position: absolute; bottom: 0; height: 26px; border-left: 1px dashed var(--ink3); padding-left: 6px; font: 500 12px var(--font-mono); color: var(--ink2); white-space: nowrap; }
+.budget .row { display: grid; grid-template-columns: 176px 1fr; gap: 14px; align-items: center; }
+.budget .lane { position: relative; height: 16px; margin-right: 8px; }
+.budget .lane .seg-bar { position: absolute; top: 1px; }
+.budget .line { position: absolute; top: -6px; bottom: -6px; border-left: 1px dashed var(--ink3); }
+.tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(188px, 1fr)); gap: 12px; }
+.tier { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.tier .tag { font: 500 12px var(--font-mono); letter-spacing: .06em; }
+.tier .big { font: 700 24px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.tier p { font-size: 13.5px; color: var(--ink2); }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font: 500 12px var(--font-mono); }
+.pill.sug { background: var(--sug-bg); color: var(--ink); border: 1px solid var(--sug); }
+.pill.rev { background: var(--rev-bg); color: var(--ink); border: 1px solid var(--rev); }
+.pill.keep { background: var(--keep-bg); color: var(--ink); border: 1px solid var(--keep); }
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line2); vertical-align: top; }
+th { font: 500 12px var(--font-mono); letter-spacing: .04em; text-transform: uppercase; color: var(--ink3); position: sticky; top: 0; background: var(--surface); white-space: nowrap; }
+th[data-k] { cursor: pointer; user-select: none; } th[data-k]:hover { color: var(--ink); }
+td.num { text-align: right; white-space: nowrap; } td.path { font: 400 12.5px var(--font-mono); word-break: break-all; min-width: 260px; }
+tr:last-child td { border-bottom: 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.chip { font: 500 13px var(--font-body); border: 1px solid var(--line); background: var(--surface); color: var(--ink2); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+input[type=search], select { font: 400 14px var(--font-body); padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); min-width: 0; }
+input[type=search] { flex: 1 1 200px; }
+button.more { font: 500 14px var(--font-body); padding: 8px 16px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; cursor: pointer; width: max-content; }
+/* decisions */
+details.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+details.card summary { cursor: pointer; padding: 14px 16px; display: grid; gap: 4px; list-style: none; }
+details.card summary::-webkit-details-marker { display: none; }
+details.card summary h3::before { content: "+"; font-family: var(--font-mono); color: var(--ink3); margin-right: 10px; display: inline-block; width: 1ch; }
+details.card[open] summary h3::before { content: "\2212"; }
+details.card .body { padding: 0 16px 16px; display: grid; gap: 12px; }
+.evidence { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.evidence li { padding-left: 14px; border-left: 2px solid var(--line); font-size: 14px; }
+.evidence li b { font-weight: 600; } .src { font: 400 12px var(--font-mono); color: var(--ink3); display: block; }
+.decided { background: var(--keep-bg); border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+/* timeline */
+ol.tl { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; border-left: 2px solid var(--line); margin-left: 6px; }
+ol.tl li { padding: 0 0 18px 20px; position: relative; display: grid; gap: 2px; }
+ol.tl li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--bg); border: 2px solid var(--ink3); }
+ol.tl li.now::before { background: var(--ink); border-color: var(--ink); }
+ol.tl time { font: 500 12.5px var(--font-mono); color: var(--ink3); }
+#tip { position: fixed; z-index: 20; pointer-events: none; background: var(--ink); color: var(--bg); padding: 6px 10px; border-radius: 6px; font: 500 12.5px var(--font-mono); max-width: 280px; display: none; }
+@media (max-width: 640px) { .bar-row { grid-template-columns: 1fr; } .budget .row { grid-template-columns: 1fr; gap: 4px; } .budget .axis { margin-left: 0; } }
+</style>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow" id="stamp"></div>
+  <h1>Storage Triage Notebook</h1>
+  <p class="lede" id="lede"></p>
+</header>
+<nav class="tabs" aria-label="Sections">
+  <a href="#state">Before and now</a><a href="#choices">Key choices</a><a href="#results">Results</a><a href="#timeline">Timeline</a>
+</nav>
+
+<section class="panel" id="p-state">
+  <div id="hashbanner"></div>
+  <div class="sub"><div class="seg" role="group" aria-label="View"><button id="vb" aria-pressed="false">Before</button><button id="vn" aria-pressed="true">Now</button></div></div>
+  <div id="state-body" class="sub" style="gap:28px"></div>
+</section>
+<section class="panel" id="p-choices"><div class="sub"><h2>Key architectural and information choices</h2><p class="muted">Each choice lists the evidence behind it, checked against its source when this page was generated, and where you steered it.</p></div><div id="choice-list" class="sub"></div></section>
+<section class="panel" id="p-results">
+  <div class="sub"><h2>Results</h2><p class="muted" id="res-lede"></p></div>
+  <div class="controls" id="chips"></div>
+  <div class="controls"><input type="search" id="q" placeholder="Filter by dataset path" aria-label="Filter by dataset path"><select id="fsel" aria-label="Filesystem"><option value="">mmfs1 + mmfs2</option><option>mmfs1</option><option>mmfs2</option></select><span class="muted" id="count"></span></div>
+  <div class="tbl"><table id="rt"><thead></thead><tbody></tbody></table></div>
+  <button class="more" id="more" hidden>Show more</button>
+  <div class="sub" id="notes"></div>
+</section>
+<section class="panel" id="p-timeline"><div class="sub"><h2>Timeline</h2><p class="muted">Dates come from git history, file timestamps and the registry.</p></div><ol class="tl" id="tl"></ol></section>
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+const D = /*DATA*/null;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const TB = 1e12, GB = 1e9, MB = 1e6;
+const fmt = b => b >= TB ? (b / TB).toFixed(b >= 10 * TB ? 1 : 2) + " TB" : b >= GB ? (b / GB).toFixed(b >= 100 * GB ? 0 : 1) + " GB" : b >= MB ? (b / MB).toFixed(0) + " MB" : b > 0 ? "<1 MB" : "0";
+const pct = (a, b) => b ? Math.round(1000 * a / b) / 10 : 0;
+const n0 = x => Number(x).toLocaleString("en-US");
+const CLS_LABEL = { raw: ["Raw acquisition", "MMStack TIFFs or raw zarr"], final: ["Final output", "Decon → DSR, or DSR"], intermediate: ["Intermediates", "crops, DSR_nodecon, processed_ngff"],
+  viewer_export: ["Viewer zarr copies", "viewer/*_dsr.ome.zarr"], provenance: ["Provenance", "movies, MIPs, json"], unknown: ["Unrecognised", "never suggested"] };
+const S = D.summary, T = S.tiers, H = D.hash;
+const TIERS = [["A1", "Duplicate copy", "sug"], ["A2", "Intermediates", "sug"], ["A3", "Viewer zarr copies", "sug"], ["B", "Your delete labels", "sug"], ["R", "Needs review", "rev"]];
+const tierBytes = t => t === "R" ? D.review_total : (T[t] ? T[t].bytes : 0);
+const tierSets = t => t === "R" ? S.review_queue.datasets : (T[t] ? T[t].datasets : 0);
+
+$("#stamp").textContent = "Generated " + S.generated.slice(0, 10) + " · " + n0(S.datasets_assessed) + " registered datasets";
+$("#lede").textContent = "What on /mmfs1 and /mmfs2 the opym-dashboard data could lose, and the evidence for each suggestion. Nothing here deletes anything; you make every delete.";
+
+// ---------- tooltips ----------
+const tip = $("#tip");
+document.addEventListener("pointermove", e => {
+  const t = e.target.closest("[data-tip]");
+  if (!t) { tip.style.display = "none"; return; }
+  tip.textContent = t.dataset.tip; tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - 290) + "px"; tip.style.top = (e.clientY + 16) + "px";
+});
+
+// ---------- state panel ----------
+function legendHTML(items) { return '<div class="legend">' + items.map(([c, l]) => `<span><i style="background:${c}"></i>${l}</span>`).join("") + "</div>"; }
+function classBars(now) {
+  const mx = Math.max(...D.footprint.map(f => f.total));
+  return '<div class="bars">' + D.footprint.map(f => {
+    const kept = f.total - f.suggested - f.review, [nm, sub] = CLS_LABEL[f.cls];
+    const w = v => (100 * v / mx).toFixed(3) + "%";
+    const segs = now
+      ? [[kept, "var(--keep)", "kept"], [f.review, "var(--rev)", "needs review"], [f.suggested, "var(--sug)", "suggested for deletion"]]
+      : [[f.total, "var(--neutral)", "on disk"]];
+    const bars = segs.filter(s => s[0] > 0).map(([v, c, l]) => `<div class="seg-bar" style="width:${w(v)};background:${c}" data-tip="${nm}: ${fmt(v)} ${l}"></div>`).join("");
+    const lab = now ? `${fmt(f.total)}` + (f.suggested ? ` · <span style="color:var(--sug)">−${fmt(f.suggested)}</span>` : "") : fmt(f.total);
+    return `<div class="bar-row"><div class="name">${nm}<small>${sub}</small></div><div class="track">${bars}<span class="val">${lab}</span></div></div>`;
+  }).join("") + "</div>";
+}
+function budget() {
+  const un = D.unassessed_total, reg = D.registered_total, sug = D.suggested_total, rev = D.review_total;
+  const rows = [["Registered today", reg, 0, null], ["After suggestions", reg - sug, 0, null], ["Also drop review queue", reg - sug - rev, 0, null]];
+  const maxv = Math.max(130 * TB, reg + (un || 0)) * 1.04, x = v => (100 * v / maxv).toFixed(3) + "%";
+  const ticks = [60 * TB, 120 * TB].map(v => `<div class="tick" style="left:${x(v)}">${v / TB} TB</div>`).join("");
+  const lines = [60 * TB, 120 * TB].map(v => `<div class="line" style="left:${x(v)}"></div>`).join("");
+  const body = rows.map(([l, v]) => `<div class="row"><div>${l}</div><div class="lane">${lines}
+      <div class="seg-bar" style="left:0;width:${x(v)};background:var(--keep)" data-tip="${l}: ${fmt(v)} registered data"></div>
+      ${un ? `<div class="seg-bar" style="left:calc(${x(v)} + 2px);width:${x(un)};background:var(--neutral)" data-tip="Folders no registered dataset covers: ${fmt(un)}"></div>` : ""}
+      <span class="val" style="position:absolute;left:calc(${x(v + (un || 0))} + 8px);top:-1px">${fmt(v + (un || 0))}${un ? "" : " (+ unassessed)"}</span></div></div>`).join("");
+  return `<div class="budget"><div class="axis">${ticks}</div>${body}</div>` +
+    legendHTML([["var(--keep)", "registered data kept"], ...(un ? [["var(--neutral)", "not assessed (" + fmt(un) + " in folders no registered dataset covers)"]] : [])]) +
+    (() => { const f = D.footprint.find(x => x.cls === "raw"), rawKept = f.total - f.suggested, fin = D.footprint.find(x => x.cls === "final"), finKept = fin.total - fin.suggested;
+      return `<p style="font-size:14px">Raw acquisitions alone come to <b>${fmt(rawKept)}</b> after the suggestions, and ${fmt(finKept)} of final output, so the raw-plus-final target is about <b>${fmt(rawKept + finKept)}</b>. ${rawKept > 60 * TB ? "That is more than one 60 TB bucket: it fits only if the pair adds up to 120 TB, or if more data is triaged out." : "That fits in one 60 TB bucket."}</p>`; })() +
+    `<p class="faint" style="font-size:13px">Dashed lines: 60 TB is one bucket; 120 TB is both if they add up rather than mirror each other. The hash proof is complete, so every proven duplicate copy is already counted as removed.</p>`;
+}
+function tierCards() {
+  return '<div class="tiers">' + TIERS.map(([t, nm, k]) => {
+    const desc = { A1: T.A1.what, A2: T.A2.what, A3: T.A3.what, B: T.B.what, R: "Labels or flags that need your eyes. Each row names the check that failed." }[t];
+    return `<div class="tier"><span class="tag pill ${k}" style="width:max-content">${t === "R" ? "REVIEW" : "TIER " + t}</span><div class="big">${fmt(tierBytes(t))}</div>
+      <div><b>${nm}</b> <span class="faint">· ${n0(tierSets(t))} datasets</span></div><p>${esc(desc)}</p></div>`;
+  }).join("") + "</div>";
+}
+function renderState(now) {
+  $("#vb").setAttribute("aria-pressed", String(!now)); $("#vn").setAttribute("aria-pressed", String(now));
+  const body = $("#state-body");
+  if (!now) {
+    const L = D.labels, o = D.old_dup_report, sl = D.seglab;
+    body.innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="n">${n0(D.registry.datasets)}</div><div class="l">datasets registered across ${Object.keys(D.registry.roots).length} roots</div></div>
+      <div class="stat"><div class="n">${fmt(D.registered_total)}</div><div class="l">on disk in those datasets, all copies counted</div></div>
+      <div class="stat"><div class="n">${L.total}</div><div class="l">hand labels (${L.by_label.delete || 0} delete, ${L.by_label.keep || 0} keep, ${L.by_label.interrogate || 0} interrogate)</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">storage suggestions; no tool connected labels to bytes${D.auto_triage_in_production ? "" : ", and auto_triage.sqlite3 was never produced"}</div></div>
+    </div>
+    <div class="sub"><h2>Footprint</h2><p class="muted">Every registered dataset, by what the bytes are. Nothing had been triaged against them.</p>${classBars(false)}</div>
+    <div class="sub"><h2>The rules in use, and where they failed</h2><div class="tbl"><table>
+      <thead><tr><th>Old rule</th><th>What went wrong</th><th>Evidence</th></tr></thead><tbody>
+      <tr><td>A <b>delete</b> label means delete</td><td>Two cells labelled delete are in the segmentation training set.</td><td>${sl.tstar_labelled_delete.map(k => esc(k.split("/").slice(-2).join("/"))).join(", ")} are among the ${sl.tstar} training cells.</td></tr>
+      <tr><td>A label stays true</td><td>Labels were made on movies made before later reprocessing.</td><td>${L.stale_total} of ${L.total} labels (${L.stale.delete || 0} of ${L.by_label.delete} deletes) are older than their dataset's latest deskew.</td></tr>
+      <tr><td>Accepting a suggestion is a label</td><td>An accepted auto suggestion was stored exactly like a click, with no record of which.</td><td>${L.has_source_column ? "label table had a source column" : "label table had no source column"}; Accept-all could write delete labels.</td></tr>
+      <tr><td>No cell detected → delete</td><td>The detector misses most OPM data.</td><td>Fired on 1 of 5 real datasets (CORE docs/ARGUS.md, benchmark 2026-09-21).</td></tr>
+      <tr><td>Same relative path = same copy</td><td>Copies of different completeness were reported as identical.</td><td>${o.not_identical} of ${o.groups} groups in the ${o.generated} duplicates.csv differ in file names or sizes today.</td></tr>
+      </tbody></table></div></div>`;
+    return;
+  }
+  const kept = D.registered_total - D.suggested_total;
+  body.innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="n" style="color:var(--sug)">${fmt(D.suggested_total)}</div><div class="l">suggested for deletion across ${n0(new Set(D.suggestions.map(s => s.name)).size)} datasets, in tiers A and B</div></div>
+      <div class="stat"><div class="n" style="color:var(--rev)">${fmt(D.review_total)}</div><div class="l">held for your review in ${S.review_queue.datasets} datasets</div></div>
+      <div class="stat"><div class="n">${fmt(kept)}</div><div class="l">registered data left if every suggestion is followed (${pct(kept, D.registered_total)}%)</div></div>
+      <div class="stat"><div class="n">${D.final_checks.ok}/${D.final_checks.total}</div><div class="l">final outputs verified complete; the rest never lose a copy or intermediate</div></div>
+    </div>
+    <div class="sub"><h2>What gets reclaimed</h2>${tierCards()}</div>
+    <div class="sub"><h2>Footprint after suggestions</h2><p class="muted">Same bytes as the Before view, split by what happens to them. Raw data and final outputs are touched only by verified duplicates and your own delete labels.</p>${classBars(true)}
+      ${legendHTML([["var(--keep)", "kept"], ["var(--rev)", "needs review"], ["var(--sug)", "suggested for deletion"]])}</div>
+    <div class="sub"><h2>Against the buckets</h2>${budget()}</div>`;
+}
+$("#vb").onclick = () => renderState(false); $("#vn").onclick = () => renderState(true);
+if (H.bytes < H.needed_bytes) {
+  const p = pct(H.bytes, H.needed_bytes);
+  $("#hashbanner").innerHTML = `<div class="banner"><b>Duplicate proof ${p}% complete.</b> ${(H.bytes / 1e12).toFixed(1)} of ${(H.needed_bytes / 1e12).toFixed(1)} TB of candidate raw files hashed across ${H.clusters} clusters. A copy is suggested only when all of its files are proven identical, so Tier A1 grows as hashing finishes. Everything below is true for the proven part and nothing is guessed for the rest.</div>`;
+}
+
+// ---------- choices ----------
+const L = D.labels, AB = D.auto_backlog, FC = D.final_checks, R = D.registry;
+const abBy = k => AB ? AB.by.filter(r => r[0] === k).reduce((a, r) => a + r[2], 0) : 0;
+const CHOICES = [
+ { t: "Suggest only; you perform every delete", why: "The tool opens every database read-only and writes only its own inventory, a dated report and a verdict file the dashboard displays. Before deleting, `verify` re-derives each row from disk and refuses any that changed.",
+   user: "“I will do the actual deletes, you can provide the suggestions”; “I am the PI so I have final say on all these.”",
+   ev: [["Rows carry a fingerprint (file count, bytes, newest mtime) so a file touched after the report invalidates its row.", "backfill/storage_triage/cli.py verify"]] },
+ { t: "Classify every byte from the registry, not from folder names", why: "The final output lives in several layouts, so the registry's own deskew output path decides what is final. Anything not recognised is class unknown and is never suggested.",
+   ev: [[Object.entries(R.final_layouts).map(([k, v]) => `<b>${v}</b> ${esc(k)}`).join("; "), "registry.sqlite3 stage_status.output_path"],
+         [`${fmt(D.footprint.find(f => f.cls === "unknown").total)} of unrecognised content (recovered MMStack prefixes, legacy Decon folders) is left alone; a dataset that contains any is suggested per known unit, never as a whole directory.`, "storage_triage.sqlite3 units"]] },
+ { t: "Duplicates are proved by content hash, not by path", why: "The old report grouped by relative path. A copy is redundant only when every raw file has a byte-identical SHA-256 twin in the copy kept; anything not yet hashed is pending and never suggested.",
+   user: "Consolidating onto the NetApp-linked S3 buckets by moving the least data, so the copy that already has raw and final output together is kept.",
+   ev: [[`Of ${D.old_dup_report.groups} groups in the ${D.old_dup_report.generated} duplicates.csv, ${D.old_dup_report.not_identical} differ in file names or sizes when re-read today.`, "opym_backfill/duplicates.csv, recomputed"],
+         [`Candidate proof reads ${(H.needed_bytes / TB).toFixed(1)} TB across ${n0(H.needed_files)} raw files in ${H.clusters} clusters (${H.pairs} pairs). Measured 1.7 to 2.8 GB/s with 8 readers.`, "storage_triage.sqlite3, hash --dry-run"],
+         ["A bug the tests found: ranking the surviving copy by total bytes picked the DataUpload copy over the lab share because it had more derived output. It now ranks by raw bytes.", "tests/test_storage_triage.py"]] },
+ { t: "A detector miss is not evidence", why: "CORE's YOLO detector does not transfer to OPM data, so “no cell found” says nothing about whether a dataset is worth keeping. It can contradict a delete (it sees a moving cell) but never support one.",
+   user: "2026-08: ambiguous motion should go to interrogate, not delete (CORE commit 396e9df).",
+   ev: [["Fired on 1 of 5 real OPM datasets.", "CORE docs/ARGUS.md, benchmark 2026-09-21"], ["3 of 47 confident suggestions were wrong in the 2026-10-02 recalibration, including two real keeps scored no cell.", "session memory, 2026-10-02"],
+         ...(AB ? [[`Backlog scored today: ${n0(AB.scored)} datasets; ${n0(abBy("delete"))} “no cell”, ${n0(abBy("interrogate"))} interrogate, ${n0(abBy("keep"))} keep. The “no cell” outcome is now named no_cell (CORE #6) and the dashboard refuses to accept it (dashboard #7).`, "auto_triage_scratch.sqlite3"]] : [])] },
+ { t: "A delete label must be human and newer than the data", why: "A label made on an older movie, or accepted from an automated suggestion, is not grounds to delete. Such rows go to the review queue with the failed check named; re-clicking Delete in the dashboard re-confirms it.",
+   ev: [[`${L.stale_total} of ${L.total} labels predate their dataset's latest reprocess (${L.stale.delete || 0} of ${L.by_label.delete} deletes).`, "triage.sqlite3 vs registry stage_status"],
+         ["The zarr geometry fix (2026-09-18) and the decon re-enable changed the images these labels were judged on.", "opym_local 1567f44; memory"],
+         ["The label table now records a source (human or accepted suggestion); older rows count as human because no auto_triage.sqlite3 ever existed.", "opym-dashboard #7"]] },
+ { t: "Downstream use outranks a label", why: "A dataset that a consumer reads is protected, and a delete label colliding with that goes to review instead of being silently kept or suggested.",
+   ev: [[`${D.seglab.tstar} cells have a chosen training timepoint; ${D.seglab.tstar_labelled_delete.length} of them are labelled delete: ${D.seglab.tstar_labelled_delete.map(k => esc(k.split("/").slice(-2).join("/"))).join(", ")}.`, "seg.sqlite3 tstar vs triage.sqlite3"],
+         [`${D.seglab.gate_pass} cells pass the training-set gate and are protected; only the 20260910 averaged PSF records its source scans, so bead and PSF deletes are reviewed.`, "seg.sqlite3, DataUpload/PSF/*.manifest.json"]] },
+ { t: "A blank output is not a verified output", why: "A final can decode, carry a progress file that says complete, and still be all zeros. Verification therefore also rejects a volume whose voxels are one constant value, and a zarr whose chunks are all one byte size (real images never compress identically).",
+   ev: [["microscopy/Cell_009: the viewer zarr holds 37,800 chunks of exactly 33,936 bytes, every DSR_decon frame has max 0, and the progress file said complete for all 300 planes. ChimeraX and the viewer show nothing while reporting every frame.", "viewer/Cell_009_dsr.ome.zarr, DSR_decon/*.tif, .opym_live.json"],
+         [`${FC.cats["blank at timepoint 0"] || 0} datasets are blank from the first frame (${fmt(FC.held_bytes["blank at timepoint 0"] || 0)} of intermediates held) and ${FC.cats["blank only at the last timepoint"] || 0} only at the last timepoint (${fmt(FC.held_bytes["blank only at the last timepoint"] || 0)} held). The last-timepoint group may be acquisitions that ended mid-timepoint; it is held until you look.`, "storage_triage.sqlite3 final_checks"],
+         ["Cause for the 11 root-level Cell_0xx: the backfill staged each store at 13:01 while Globus was still writing it (chunk files dated 12:59 to 13:47). Unlanded chunks read as fill_value 0, so the staged frames, the eroded mask built from the first one (0% nonzero, against 86.6% on a healthy dataset) and all decon output were zero, and every stage recorded done.", "registry stage_status, DSR_decon/../Masks, raw store mtimes"],
+         [`Eroded masks that are completely empty: ${D.empty_masks ? D.empty_masks.zarr + " zarr and " + D.empty_masks.tif + " TIFF datasets" : "not scanned"}. The six TIFF cases are not Globus transfers and their cause is still open.`, "Decon/Masks/*_eroded.zarr, read directly"],
+         ["Fixes: staging waits for a store to be idle 15 minutes and rebuilds frames older than the source (bioimaging #20); verification rejects blank outputs (bioimaging #19). Both merged; the backfill service was restarted on the fix, and Cell_002 to Cell_011 were cleared and queued for reprocessing.", "bioimaging #19, #20"]] },
+ { t: "Keep raw and final output; drop the rest only after the final is verified", why: "Intermediates are regenerable, but only when the output you keep is whole. A final passes when its timepoints are contiguous and match the registry, no frame is empty and the first and last frames decode (TIFF series); single volumes must decode; live-lane stores are checked against their own progress file.",
+   user: "“I just want to keep a copy of the raw data and the final processed data (deconvolved → DSR) if it exists, or just DSR if no decon was run.”",
+   ev: [[`${FC.ok} of ${FC.total} finals verified complete.`, "storage_triage.sqlite3 final_checks"],
+         [`Reclaimable if all verified: ${fmt(D.footprint.find(f => f.cls === "intermediate").total)} of intermediates and ${fmt(D.footprint.find(f => f.cls === "viewer_export").total)} of viewer zarr copies. The viewer copies are their own tier because napari, ChimeraX and the 3-D viewer read them (they fall back to the TIFFs).`, "storage_triage.sqlite3 units"],
+         [`Outcomes of the final-output check: ${FC.ok} verified; held: ${Object.entries(FC.cats).map(([k, v]) => v + " " + k).join("; ")}.`, "storage_triage.sqlite3 final_checks"],
+         ["Two checker errors found against real data and fixed: zarr writers skip all-zero chunks, so a sparse grid is not an incomplete store; and bead scans are single volumes, not …_C#_T#.tif series.", "tests/test_storage_triage.py"]] },
+];
+$("#choice-list").innerHTML = CHOICES.map((c, i) => `<details class="card"${i === 0 ? " open" : ""}><summary><h3>${c.t}</h3></summary><div class="body"><p>${c.why}</p>
+  ${c.user ? `<div class="decided"><b>You decided:</b> ${c.user}</div>` : ""}
+  <ul class="evidence">${c.ev.map(([t, s]) => `<li>${t}<span class="src">${esc(s)}</span></li>`).join("")}</ul></div></details>`).join("");
+
+// ---------- results ----------
+const COLS = [["tier", "Tier"], ["rule", "Rule"], ["fs", "FS"], ["name", "Dataset"], ["bytes", "Size"], ["nfiles", "Files"], ["evidence", "Why"]];
+let rows = [], tierSel = "A1", sortK = "bytes", sortDir = -1, shown = 100;
+const reviewRows = D.review.map(r => ({ tier: "R", rule: "R1", fs: r.fs, name: r.name, bytes: r.bytes, nfiles: 0, evidence: r.reasons.join(" | ") }));
+function visible() {
+  const q = $("#q").value.toLowerCase(), f = $("#fsel").value;
+  const src = tierSel === "R" ? reviewRows : D.suggestions.filter(s => s.tier === tierSel);
+  return src.filter(r => (!q || r.name.toLowerCase().includes(q)) && (!f || r.fs === f))
+            .sort((a, b) => (typeof a[sortK] === "number" ? a[sortK] - b[sortK] : String(a[sortK]).localeCompare(String(b[sortK]))) * sortDir);
+}
+function renderChips() {
+  $("#chips").innerHTML = TIERS.map(([t, nm]) => `<button class="chip" data-t="${t}" aria-pressed="${t === tierSel}">${t === "R" ? "Review" : "Tier " + t} · ${nm} · ${fmt(tierBytes(t))}</button>`).join("");
+  document.querySelectorAll(".chip").forEach(b => b.onclick = () => { tierSel = b.dataset.t; shown = 100; renderChips(); renderTable(); });
+}
+function renderTable() {
+  const v = visible(), tot = v.reduce((a, r) => a + r.bytes, 0);
+  $("#rt thead").innerHTML = "<tr>" + COLS.map(([k, l]) => `<th data-k="${k}"${k === sortK ? ` aria-sort="${sortDir < 0 ? "descending" : "ascending"}"` : ""}>${l}${k === sortK ? (sortDir < 0 ? " ▾" : " ▴") : ""}</th>`).join("") + "</tr>";
+  $("#rt thead").querySelectorAll("th").forEach(th => th.onclick = () => { const k = th.dataset.k; sortDir = k === sortK ? -sortDir : (k === "bytes" || k === "nfiles" ? -1 : 1); sortK = k; renderTable(); });
+  $("#rt tbody").innerHTML = v.slice(0, shown).map(r => `<tr><td>${r.tier}</td><td>${r.rule}</td><td>${r.fs}</td><td class="path">${esc(r.name)}${r.kept ? `<span class="src">keeps ${esc(r.kept)}</span>` : ""}</td><td class="num">${fmt(r.bytes)}</td><td class="num">${r.nfiles ? n0(r.nfiles) : ""}</td><td>${esc(r.evidence)}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">Nothing in this tier yet.</td></tr>`;
+  $("#count").textContent = n0(v.length) + " rows · " + fmt(tot);
+  const m = $("#more"); m.hidden = v.length <= shown; m.textContent = "Show " + Math.min(100, v.length - shown) + " more";
+}
+$("#more").onclick = () => { shown += 100; renderTable(); };
+$("#q").oninput = () => { shown = 100; renderTable(); }; $("#fsel").onchange = () => { shown = 100; renderTable(); };
+$("#res-lede").textContent = "Every suggested row, grouped by tier. Sort on any column. The same rows are in suggestions.csv and the paths_tier*.txt lists next to the report.";
+$("#notes").innerHTML = D.notes.length ? `<h3>Report notes</h3><ul class="evidence">${D.notes.map(n => `<li>${esc(n.replace(/\/mmfs[12]\/scratch\//g, ""))}</li>`).join("")}</ul>` : "";
+renderChips(); renderTable();
+
+// ---------- timeline ----------
+const TL = [
+  [R.first_discovered, "Registry first discovers " + n0(R.datasets) + " datasets across three roots.", "registry.sqlite3"],
+  [L.first, "First hand triage label.", "triage.sqlite3"],
+  ["2026-08-07", "celldet-autotriage first committed: YOLO + SORT suggests keep, delete or interrogate.", "CORE f78d311"],
+  ["2026-08-08", "Ambiguous motion routed to interrogate instead of delete after calibration on hand labels.", "CORE 396e9df"],
+  ["2026-09-18", "Zarr geometry fix: every zarr dataset is deskewed again, so earlier labels predate the images.", "opym_local 1567f44"],
+  [D.old_dup_report.generated, "duplicates.csv written: " + D.old_dup_report.groups + " groups matched by relative path.", "file timestamp"],
+  ["2026-09-21", "Benchmark: yolo_best.pt fires on 1 of 5 real OPM datasets.", "CORE docs/ARGUS.md"],
+  ["2026-10-02", "Recalibration: 3 of 47 confident auto suggestions wrong; backlog never scored.", "session memory"],
+  [L.last, "Most recent hand label.", "triage.sqlite3"],
+  ["2026-10-14", "Globus copies the root-level Cell_001..Cell_011 zarr stores (chunk files dated 12:59 to 13:47); the backfill stages them at 13:01 and decon writes zeros.", "raw store mtimes, DSR_decon mtimes"],
+  [S.generated.slice(0, 10), "Storage triage built: CORE #6, opym-dashboard #7, bioimaging #17 merged. Registry scanned, final outputs verified, duplicate proof " + pct(H.bytes, H.needed_bytes) + "% done at generation. Blank-output and Globus-staging bugs found on real data and fixed (#19, #20).", "GitHub, storage_triage.sqlite3"],
+];
+$("#tl").innerHTML = TL.map(([d, t, s], i) => `<li${i === TL.length - 1 ? ' class="now"' : ""}><time>${d}</time><span>${esc(t)}</span><span class="src">${esc(s)}</span></li>`).join("");
+
+// ---------- tabs ----------
+function route() {
+  const h = (location.hash || "#state").slice(1), name = ["state", "choices", "results", "timeline"].includes(h) ? h : "state";
+  document.querySelectorAll("section.panel").forEach(p => p.classList.toggle("on", p.id === "p-" + name));
+  document.querySelectorAll("nav.tabs a").forEach(a => a.toggleAttribute("aria-current", a.getAttribute("href") === "#" + name) || a.removeAttribute("aria-current"));
+  document.querySelectorAll("nav.tabs a").forEach(a => { if (a.getAttribute("href") === "#" + name) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+}
+addEventListener("hashchange", route); route(); renderState(true);
+</script>
