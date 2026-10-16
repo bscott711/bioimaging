@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -54,10 +55,29 @@ SKEW_DEG = 60.0
 PAD_Z = 24  # >= half the decimated PSF support (17 planes bead; 33 planes large synthetic)
 OPYM_DIR = Path(__file__).resolve().parents[2] / "opym_local" / "src" / "opym"
 
+# PetaKit's XR_decon_data_wrapper turns an empty `background` into 100 (XR_decon_data_wrapper.m:219), and the decon function then
+# clamps at 0. So `background=None` ALREADY subtracts the camera offset: production does, and so does every arm that leaves it None.
+# Shifted Poisson: read noise (variance 20 counts^2) over the photon-transfer slope (3.0 counts^2 per count) is ~6.7 counts of
+# "equivalent photon background"; leaving it in the data (background = 100 - 6.7 ~ 93) makes the clamped data near-Poisson, which is
+# what RL's likelihood assumes and what the clamp at 0 otherwise biases (+1.7 counts in dark voxels).
+SHIFTED_POISSON_BG = 93.0
+STAGED_AXES = "zyx"  # the staged TIFFs are (nz, ny, nx); PetaKit reads the same pages as (ny, nx, nz)
+FLOOR_FOOTPRINTS_UM = (6.0, 10.0)  # grey-opening footprints tried besides the 3 um default (a larger one spares more of the cell)
+SUPERSEDED_FLOOR = ("floor computed with the axes mislabelled ((nz,ny,nx) read as (ny,nx,nz): ~10 um footprint along the scan "
+                    "axis, <1 um along x); replaced by the *_bgv2 arms (2026-10-16)")
+
 PROD = dict(
     decon=True, rl_method="omw", iters=2, alpha=DECON_WIENER_ALPHA, otf_thresh=DECON_OTF_CUM_THRESH,
     hann=list(DECON_HANN_WIN_BOUNDS), background=None, damp=DECON_DAMP_FACTOR,
 )
+
+
+def floor_dir_name(src: str, open_um: float = 3.0, view: bool = False) -> str:
+    """Name of the directory holding `src` with its haze floor subtracted (`view`: the floor itself). `_bgv2` / `_floorv2`
+    never collide with the pre-fix `stage_bg` / `stage_floor` directories, whose outputs were made with the wrong axes."""
+    tag = "floorv2" if view else "bgv2"
+    base = f"stage_{tag}" if src == "stage" else f"{src}_{tag}"
+    return base if open_um == 3.0 else f"{base}_o{open_um:g}"
 
 
 def _omw(name: str, **kw) -> dict:
@@ -70,6 +90,10 @@ def arm_table(psfs: dict[str, str], cell: str | None = None) -> dict[str, dict]:
     arms: dict[str, dict] = {
         "nodecon": {"name": "nodecon", "decon": False},
         "prod": _omw("prod"),
+        # identity control: an explicit background=100 must be bit-identical to `prod` (PetaKit's own default), proving that production
+        # already subtracts the offset; `python -m psf_tools.decon_v2_trial identity` compares them
+        "prod_bg100_check": _omw("prod_bg100_check", background=100.0),
+        "prod_bg93": _omw("prod_bg93", background=SHIFTED_POISSON_BG),  # production, but the offset only down to the shifted-Poisson level
         "pad": _omw("pad", pad_z=PAD_Z, edge_erosion=0),
     }
     for a_tag, alpha in (("a05", 0.05), ("a02", 0.02)):
@@ -94,19 +118,37 @@ def arm_table(psfs: dict[str, str], cell: str | None = None) -> dict[str, dict]:
     if cell is not None and "synL_488" in psfs:
         # residual-haze background term: same synthetic large PSF, input with the smooth lower envelope removed
         arms["synL_bg"] = _omw("synL_bg", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_bg")),
-                               psf_paths=[psfs["synL_488"], psfs["synL_561"]])
+                               psf_paths=[psfs["synL_488"], psfs["synL_561"]], superseded=SUPERSEDED_FLOOR)
     if cell is not None:
         # self-supervised denoise (psf_tools.n2v_denoise) ahead of decon; `n2v_prod` changes ONLY the input
         arms["n2v_prod"] = _omw("n2v_prod", stage_dir=str(stage_dir(cell, "stage_n2v")))
         # views, not decon arms: the denoised input and the haze floor each through the plain DSR, to look at what they do alone
         arms["n2v_only"] = {"name": "n2v_only", "decon": False, "stage_dir": str(stage_dir(cell, "stage_n2v"))}
-        arms["floor_only"] = {"name": "floor_only", "decon": False, "stage_dir": str(stage_dir(cell, "stage_floor"))}
+        arms["floor_only"] = {"name": "floor_only", "decon": False, "stage_dir": str(stage_dir(cell, "stage_floor")),
+                              "superseded": SUPERSEDED_FLOOR}
         if "synL_488" in psfs:
+            syn = [psfs["synL_488"], psfs["synL_561"]]
             arms["n2v_synL"] = _omw("n2v_synL", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_n2v")),
-                                    psf_paths=[psfs["synL_488"], psfs["synL_561"]])
+                                    psf_paths=syn)
             # all three together: denoise, then subtract the haze floor of the denoised volume, then decon with the large PSF
             arms["n2v_synL_bg"] = _omw("n2v_synL_bg", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_n2v_bg")),
-                                       psf_paths=[psfs["synL_488"], psfs["synL_561"]])
+                                       psf_paths=syn, superseded=SUPERSEDED_FLOOR)
+            # --- 2026-10-16: corrected-geometry floors (`*_bgv2`; see decon_haze_bg.py) and the dark-map chain. They leave `background`
+            # None like production, so PetaKit subtracts the offset (100) itself; `*_bg93` leave 7 counts of the offset in instead.
+            arms["synL_bg93"] = _omw("synL_bg93", pad_z=PAD_Z, edge_erosion=0, psf_paths=syn, background=SHIFTED_POISSON_BG)
+            kw = dict(pad_z=PAD_Z, edge_erosion=0, psf_paths=syn)
+            arms["n2v_synL_bgv2"] = _omw("n2v_synL_bgv2", stage_dir=str(stage_dir(cell, floor_dir_name("stage_n2v"))), **kw)
+            for um in FLOOR_FOOTPRINTS_UM:
+                arms[f"n2v_synL_bgv2o{um:g}"] = _omw(f"n2v_synL_bgv2o{um:g}",
+                                                     stage_dir=str(stage_dir(cell, floor_dir_name("stage_n2v", um))), **kw)
+            # control for the chain below: N2V retrained on the RAW frames a second time (`stage_n2v_rep`), then floor and decon exactly as
+            # `n2v_synL_bgv2`. The spread between the two is N2V's own run-to-run variation, the yardstick for the dark map's effect.
+            arms["n2v_rep_synL_bgv2"] = _omw("n2v_rep_synL_bgv2", stage_dir=str(stage_dir(cell, floor_dir_name("stage_n2v_rep"))), **kw)
+            # the whole chain: dark map -> N2V -> floor -> large PSF
+            arms["n2v_dark_synL_bgv2"] = _omw("n2v_dark_synL_bgv2", stage_dir=str(stage_dir(cell, floor_dir_name("stage_n2v_dark"))), **kw)
+            for um in (3.0, *FLOOR_FOOTPRINTS_UM):  # the floor itself through the plain DSR, per footprint
+                n = "floor_onlyv2" if um == 3.0 else f"floor_onlyv2o{um:g}"
+                arms[n] = {"name": n, "decon": False, "stage_dir": str(stage_dir(cell, floor_dir_name("stage", um, view=True)))}
     return arms
 
 
@@ -131,46 +173,75 @@ def stage_cell(cell: str) -> Path:
     return build_decon_staging_dir(stores, stage_dir(cell), dataset_prefix=cell, timepoints=[t])
 
 
-def stage_bg_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Path:
-    """`stage_bg/`: the staged TIFFs with the haze floor (psf_tools.decon_haze_bg) subtracted, same names."""
-    from psf_tools.decon_haze_bg import subtract_haze
+def floor_stage(cell: str, src: str = "stage", open_um: float = 3.0, smooth_um: float = 3.0, view: bool = False) -> Path:
+    """Write `src` (a staged directory of (nz, ny, nx) TIFFs) with its haze floor subtracted into `floor_dir_name(src, open_um)`,
+    same file names; with `view` write the floor itself instead (uint16, so it can be deskewed and looked at). The floor of a
+    denoised `src` is estimated on the denoised volume, where its lower envelope is not pulled down by noise."""
+    from psf_tools.decon_haze_bg import haze_floor, subtract_haze
 
-    out = stage_dir(cell, "stage_bg")
+    files = sorted(stage_dir(cell, src).glob("*.tif"))
+    if not files:
+        raise SystemExit(f"{cell}: no TIFFs in {src}/ (stage / n2v_denoise / stage-dark first)")
+    out = stage_dir(cell, floor_dir_name(src, open_um, view))
     out.mkdir(parents=True, exist_ok=True)
-    for f in sorted(stage_dir(cell).glob("*.tif")):
+    kw = dict(axes=STAGED_AXES, xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um, smooth_um=smooth_um)
+    for f in files:
         vol = tifffile.imread(f)
-        tifffile.imwrite(out / f.name, subtract_haze(vol, xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um,
-                                                     smooth_um=smooth_um), compression="zlib")
-        print(f"[stage_bg] {f.name}: median {np.median(vol):.0f} -> {np.median(tifffile.imread(out / f.name)):.0f}")
+        if view:
+            res = np.clip(np.rint(haze_floor(vol, **kw)), 0, np.iinfo(np.uint16).max).astype(np.uint16)
+        else:
+            res = subtract_haze(vol, **kw)
+        tifffile.imwrite(out / f.name, res, compression="zlib")
+        print(f"[floor] {src}/{f.name} -> {out.name}: median {np.median(vol):.0f} -> {np.median(res):.0f}", flush=True)
     return out
 
 
-def stage_n2v_bg_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Path:
-    """`stage_n2v_bg/`: the DENOISED staged TIFFs (`stage_n2v/`) with the haze floor of the denoised volume subtracted.
-    The floor is estimated after denoising because its lower envelope is then not pulled down by noise."""
-    from psf_tools.decon_haze_bg import subtract_haze
-
-    out = stage_dir(cell, "stage_n2v_bg")
-    out.mkdir(parents=True, exist_ok=True)
-    src = sorted(stage_dir(cell, "stage_n2v").glob("*.tif"))
-    if not src:
-        raise SystemExit(f"{cell}: no denoised frames in stage_n2v/; run psf_tools.n2v_denoise first")
-    for f in src:
-        tifffile.imwrite(out / f.name, subtract_haze(tifffile.imread(f), xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM,
-                                                     open_um=open_um, smooth_um=smooth_um), compression="zlib")
-    return out
+def dark_map_path(channel: int) -> Path:
+    return WORKSPACE / f"dark_map_C{channel}.npz"
 
 
-def stage_floor_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Path:
-    """`stage_floor/`: the haze floor itself (what `stage_bg` subtracts), as uint16 TIFFs with the staged names, so it can be
-    deskewed and rotated like data and looked at."""
-    from psf_tools.decon_haze_bg import haze_floor
+def _channel_of(name: str) -> int:
+    m = re.search(r"_C(\d+)_T", name)
+    if not m:
+        raise ValueError(f"no channel in {name!r}")
+    return int(m.group(1))
 
-    out = stage_dir(cell, "stage_floor")
-    out.mkdir(parents=True, exist_ok=True)
-    for f in sorted(stage_dir(cell).glob("*.tif")):
-        floor = haze_floor(tifffile.imread(f), xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um, smooth_um=smooth_um)
-        tifffile.imwrite(out / f.name, np.clip(np.rint(floor), 0, np.iinfo(np.uint16).max).astype(np.uint16), compression="zlib")
+
+def estimate_dark_map_all() -> list[Path]:
+    """Per channel, the per-camera-pixel fixed pattern pooled over that channel's staged volume of every trial cell (the cells
+    share one camera crop). The channels are NOT pooled: C0 vs C1 per-pixel r = 0.25 against 0.86 for C1 across cells, so they
+    carry different patterns. Pooling shrinks the estimate's own noise (read variance ~20 / dark-voxel count)."""
+    from psf_tools.decon_haze_bg import estimate_dark_map
+
+    paths = []
+    for ch in CHANNELS:
+        vols = [tifffile.imread(f) for cell in TRIAL_CELLS for f in sorted(stage_dir(cell).glob(f"{cell}_C{ch}_T*.tif"))]
+        shapes = {v.shape[1:] for v in vols}
+        if len(shapes) != 1:
+            raise SystemExit(f"C{ch}: trial volumes do not share one camera crop: {shapes}")
+        dmap, cnt = estimate_dark_map(vols, axes=STAGED_AXES)
+        np.savez_compressed(dark_map_path(ch), dark_map=dmap, count=cnt)
+        print(f"[dark] C{ch}: {len(vols)} volumes, map sd {dmap[cnt >= 60].std():.2f} counts, pixels with data {(cnt >= 60).mean():.2f}")
+        paths.append(dark_map_path(ch))
+    return paths
+
+
+def stage_dark_cell(cell: str) -> Path:
+    """`stage_dark/`: staged TIFFs with the per-pixel camera pattern of their channel removed (the constant offset stays), as
+    float32 so the sub-count correction is not rounded away; this is the input N2V should see, because the pattern is
+    z-correlated."""
+    from psf_tools.decon_haze_bg import subtract_bias
+
+    if not all(dark_map_path(c).is_file() for c in CHANNELS):
+        estimate_dark_map_all()
+    dmaps = {c: np.load(dark_map_path(c))["dark_map"] for c in CHANNELS}
+    out = stage_dir(cell, "stage_dark")
+    # the target and the cell's N2V training frames: N2V must not see the pattern in either, or it learns it as signal
+    for src, dst in ((stage_dir(cell), out), (stage_dir(cell, "n2v_train"), stage_dir(cell, "n2v_train_dark"))):
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in sorted(src.glob("*.tif")):
+            res = subtract_bias(tifffile.imread(f), axes=STAGED_AXES, dark_map=dmaps[_channel_of(f.name)], keep_offset=True)
+            tifffile.imwrite(dst / f.name, res, compression="zlib")
     return out
 
 
@@ -272,6 +343,21 @@ def gate(cell: str, variant_name: str = "prod") -> dict:
     return out
 
 
+def identity_check(cell: str) -> dict:
+    """`prod_bg100_check` (explicit background=100) against `prod` (background None): PetaKit turns None into 100, so every voxel
+    must be equal. Writes <cell>/identity_bg100.json with the far-field median of the production volume (0 = the offset is gone)."""
+    arms = read_variants(cell)
+    out = {}
+    for c in CHANNELS:
+        a = tifffile.imread(dsr_tif(cell, arms["prod"], c))
+        b = tifffile.imread(dsr_tif(cell, arms["prod_bg100_check"], c))
+        out[f"C{c}"] = {"identical": bool(np.array_equal(a, b)), "max_abs_diff": float(np.abs(a.astype(np.int64) - b).max()),
+                        "prod_far_corner_median": float(np.median(a[:, :40, :40]))}
+    (cell_dir(cell) / "identity_bg100.json").write_text(json.dumps(out, indent=1))
+    print(json.dumps(out))
+    return out
+
+
 def check_shapes(cell: str) -> dict:
     """Every arm's DSR volume must have the production geometry."""
     res = {}
@@ -318,21 +404,28 @@ def write_manifest(cell: str) -> Path:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["stage", "stage-bg", "stage-floor", "stage-n2v-bg", "variants", "run", "gate", "check-shapes", "manifest"])
+    ap.add_argument("cmd", choices=["stage", "stage-bg", "stage-floor", "stage-n2v-bg", "stage-dark", "dark-map", "variants", "run",
+                                    "gate", "check-shapes", "manifest", "identity"])
     ap.add_argument("--cell", required=True, choices=sorted(TRIAL_CELLS))
     ap.add_argument("--arms", nargs="*", default=["nodecon", "prod", "pad"])
     ap.add_argument("--variant", default="prod")
     ap.add_argument("--gpu", default="1")
+    ap.add_argument("--src", default=None, help="stage-bg / stage-n2v-bg / stage-floor: the staged directory to take the floor of")
+    ap.add_argument("--open-um", type=float, default=3.0, help="grey-opening footprint of the haze floor")
     a = ap.parse_args(argv)
     cell_dir(a.cell).mkdir(parents=True, exist_ok=True)
     if a.cmd == "stage":
         print(stage_cell(a.cell))
     elif a.cmd == "stage-n2v-bg":
-        print(stage_n2v_bg_cell(a.cell))
+        print(floor_stage(a.cell, a.src or "stage_n2v", a.open_um))
     elif a.cmd == "stage-floor":
-        print(stage_floor_cell(a.cell))
+        print(floor_stage(a.cell, a.src or "stage", a.open_um, view=True))
     elif a.cmd == "stage-bg":
-        print(stage_bg_cell(a.cell))
+        print(floor_stage(a.cell, a.src or "stage", a.open_um))
+    elif a.cmd == "dark-map":
+        print(estimate_dark_map_all())
+    elif a.cmd == "stage-dark":
+        print(stage_dark_cell(a.cell))
     elif a.cmd == "variants":
         print(make_variants(a.cell, a.arms))
     elif a.cmd == "run":
@@ -342,6 +435,8 @@ def main(argv=None) -> int:
         return rc
     elif a.cmd == "manifest":
         print(write_manifest(a.cell))
+    elif a.cmd == "identity":
+        identity_check(a.cell)
     elif a.cmd == "gate":
         gate(a.cell, a.variant)
     else:
