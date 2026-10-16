@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `psf_tools.decon_v2_cohort`: runs the decon-v2 `prod` controls and the combined arm (N2V + haze floor + OMW with the large synthetic PSF) on a
+- `psf_tools.decon_v2_cohort`: runs the decon-v2 `prod` controls and the combined arm (N2V + the corrected `*_bgv2` haze floor + OMW with the large synthetic PSF) on a
   table of cells (`seglab dv2-cells`), membrane channel only, with a gate against the STORED volume. `prod` and `prod_cubic` decide how the combined arm
   is resampled (datasets processed before 2026-09-24 match cubic exactly). `decon_v2_trial` takes a per-cell `CellSpec` (`--cohort FILE`), and
   `n2v_denoise` predicts several targets from one trained model (`--targets/--outs`). Out-of-band: nothing under `DSR_decon`, the queue or the services.
