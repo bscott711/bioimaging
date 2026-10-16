@@ -24,8 +24,10 @@ import tifffile
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--train", nargs="+", type=Path, required=True)
-    ap.add_argument("--target", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--target", type=Path, default=None)
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--targets", nargs="+", type=Path, default=None, help="several volumes denoised by the ONE trained model (with --outs)")
+    ap.add_argument("--outs", nargs="+", type=Path, default=None)
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--steps", type=int, default=120, help="batches per epoch")
@@ -34,6 +36,10 @@ def main(argv=None) -> int:
     ap.add_argument("--gpu", type=int, default=0)
     a = ap.parse_args(argv)
 
+    targets = list(a.targets or ([a.target] if a.target else []))
+    outs = list(a.outs or ([a.out] if a.out else []))
+    if not targets or len(targets) != len(outs):
+        raise SystemExit("give --target/--out, or --targets/--outs of the same length")
     import torch
     from careamics import CAREamist
     from careamics.config import create_n2v_config
@@ -41,23 +47,24 @@ def main(argv=None) -> int:
     torch.set_float32_matmul_precision("medium")
     vols = np.stack([tifffile.imread(f).astype(np.float32) for f in a.train])  # (S, Z, Y, X)
     print(f"training on {vols.shape} from {[f.name for f in a.train]}", flush=True)
-    cfg = create_n2v_config(experiment_name=a.out.stem, data_type="array", axes="SZYX", patch_size=list(a.patch),
+    cfg = create_n2v_config(experiment_name=outs[0].stem, data_type="array", axes="SZYX", patch_size=list(a.patch),
                             batch_size=a.batch, num_epochs=a.epochs, num_steps=a.steps, n_val_patches=16)
     cfg.training_config.trainer_params = {**(cfg.training_config.trainer_params or {}), "accelerator": "gpu", "devices": [a.gpu]}
     a.work.mkdir(parents=True, exist_ok=True)
     cm = CAREamist(cfg, work_dir=a.work)
     cm.train(train_data=vols)
-    tgt = tifffile.imread(a.target).astype(np.float32)
-    pred, _ = cm.predict(tgt, data_type="array", axes="ZYX", tile_size=(32, 256, 256), tile_overlap=(8, 48, 48))
-    out = np.squeeze(np.asarray(pred[0]))
-    if out.shape != tgt.shape:
-        raise SystemExit(f"denoised shape {out.shape} != target {tgt.shape}")
-    out = np.clip(np.rint(out), 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(a.out, out, compression="zlib")
-    d = out.astype(np.float32) - tgt
-    print(f"wrote {a.out}: median in {np.median(tgt):.1f} out {np.median(out):.1f}, mean |change| {np.abs(d).mean():.2f}, "
-          f"p99.9 in {np.percentile(tgt, 99.9):.0f} out {np.percentile(out, 99.9):.0f}", flush=True)
+    for target, out_path in zip(targets, outs):
+        tgt = tifffile.imread(target).astype(np.float32)
+        pred, _ = cm.predict(tgt, data_type="array", axes="ZYX", tile_size=(32, 256, 256), tile_overlap=(8, 48, 48))
+        out = np.squeeze(np.asarray(pred[0]))
+        if out.shape != tgt.shape:
+            raise SystemExit(f"denoised shape {out.shape} != target {tgt.shape}")
+        out = np.clip(np.rint(out), 0, np.iinfo(np.uint16).max).astype(np.uint16)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tifffile.imwrite(out_path, out, compression="zlib")
+        d = out.astype(np.float32) - tgt
+        print(f"wrote {out_path}: median in {np.median(tgt):.1f} out {np.median(out):.1f}, mean |change| {np.abs(d).mean():.2f}, "
+              f"p99.9 in {np.percentile(tgt, 99.9):.0f} out {np.percentile(out, 99.9):.0f}", flush=True)
     return 0
 
 
