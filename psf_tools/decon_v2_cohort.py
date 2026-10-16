@@ -6,7 +6,7 @@ membrane channel only, at the timepoint the masks were drawn on (+ optional neig
   DECON_V2_WORKSPACE=<ws> uv run python -m psf_tools.decon_v2_cohort run --cells 0902_cell_004,... [--ts-around 2] [--gpu 1]
 
 Per cell, each step skipped when its output exists (rerun to resume): stage -> N2V (trained on that cell's own frames, up to 5
-timepoints spread through the series, T* among them) -> haze floor of the denoised volume -> `prod` and `n2v_synL_bg` through the
+timepoints spread through the series, T* among them) -> haze floor of the denoised volume (the corrected `*_bgv2` floor, see decon_haze_bg.py) -> `prod` and `n2v_synL_bgv2` through the
 out-of-band MATLAB driver -> gate (`prod` or `prod_cubic` must reproduce the STORED volume, r >= 0.9999; the one that does sets the combined arm's interpolation) -> shape check -> manifest.
 A cell that fails the gate or the shape check is reported and its volumes must not be used: the reviewed masks live on the stored
 geometry. Nothing touches `DSR_decon`, the production queue or the services. GPU work waits while an acquisition holds the live lease.
@@ -28,7 +28,7 @@ from psf_tools import decon_v2_trial as T
 
 CAREAMICS_PY = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/decon_sweeps/envs/careamics/bin/python")
 CONTROLS = ["prod", "prod_cubic"]   # which of them reproduces the stored volume says how it was resampled
-ARMS = ["n2v_synL_bg"]
+ARMS = ["n2v_synL_bgv2"]   # N2V + the CORRECTED haze floor (`*_bgv2`) + the large synthetic PSF; the old `n2v_synL_bg` used the mislabelled-axes floor
 LEASE = Path(os.environ.get("PETAKIT_JOBS_DIR", "/dev/shm/petakit_jobs")) / "LIVE_LEASE.json"
 GATE_R = 0.9999
 
@@ -86,8 +86,8 @@ def run_cell(cid: str, table: dict, ts_around: int, gpu: str) -> dict:
     if not any(T.stage_dir(cid).glob("*.tif")):
         T.stage_cell(cid)
     stage_n2v(cid, c, ts, gpu, T.cell_dir(cid) / "n2v_C0.log")
-    if not any(T.stage_dir(cid, "stage_n2v_bg").glob("*.tif")):
-        T.stage_n2v_bg_cell(cid)
+    if not any(T.stage_dir(cid, T.floor_dir_name("stage_n2v")).glob("*.tif")):
+        T.floor_stage(cid, "stage_n2v")
     wait_for_live_lane()
 
     def arm(name):
@@ -119,7 +119,7 @@ def run_cell(cid: str, table: dict, ts_around: int, gpu: str) -> dict:
     g = gates[ok_arms[0] if ok_arms else "prod"]
     res = dict(cid=cid, t=sp.t, ts=ts, z_step_um=sp.z_step_um, gate=g, gates={a: {c: v["pearson_r"] for c, v in gates[a].items()} for a in CONTROLS},
                gate_ok=ok_gate, matched_control=ok_arms[0] if ok_arms else None, interp=interp or "linear (current default)",
-               shapes_ok=bool(ok_shape), combined=str(T.dsr_tif(cid, arm("n2v_synL_bg"), 0)), seconds=round(time.time() - t0))
+               shapes_ok=bool(ok_shape), combined=str(T.dsr_tif(cid, arm("n2v_synL_bgv2"), 0)), seconds=round(time.time() - t0))
     (T.cell_dir(cid) / "cohort_result.json").write_text(json.dumps(res, indent=1))
     print(f"{cid}: gate {'ok (' + res['matched_control'] + ', ' + res['interp'] + ')' if ok_gate else 'FAILED'} (r {[round(v['pearson_r'], 6) for v in g.values()]}), shapes {'ok' if ok_shape else 'BAD'}, "
           f"{res['seconds']} s", flush=True)

@@ -23,10 +23,10 @@ def cohort(tmp_path, monkeypatch):
     (tmp_path / "ws").mkdir()
     (tmp_path / "ws" / "psfs.json").write_text(json.dumps({k: str(tmp_path / f"{k}.tif") for k in ("synL_488", "synL_561", "syn_488", "syn_561", "synL_sa0_488", "synL_sa0_561")}))
     monkeypatch.setattr("opym.metadata.parse_zarr_z_step_from_store", lambda store: 0.3)
-    saved = dict(T.SPECS), dict(T.TRIAL_CELLS), dict(T.COHORT_ID)
+    saved = dict(T.SPECS)
     ids = T.load_cohort(f)
     yield ids, tmp_path
-    T.SPECS.clear(); T.SPECS.update(saved[0]); T.TRIAL_CELLS.clear(); T.TRIAL_CELLS.update(saved[1]); T.COHORT_ID.clear(); T.COHORT_ID.update(saved[2])
+    T.SPECS.clear(); T.SPECS.update(saved)
 
 
 def test_load_cohort_builds_membrane_only_specs_and_reads_the_z_step_from_the_store_when_the_table_has_none(cohort):
@@ -35,14 +35,15 @@ def test_load_cohort_builds_membrane_only_specs_and_reads_the_z_step_from_the_st
     a, b = T.spec("9999_Cell_A"), T.spec("9999_Cell_B")
     assert a.channels == (0,) and len(a.stores) == 1 and a.stores[0].name == "A_GFP_488.ome.zarr"
     assert a.z_step_um == 0.5 and b.z_step_um == 0.3                      # the table's own, else the store's (mocked 0.3)
-    assert T.TRIAL_CELLS["9999_Cell_B"] == 1 and T.COHORT_ID["9999_Cell_B"] == "9999_Cell_B"
+    assert b.t == 1 and b.cohort_id == "9999_Cell_B"
+    assert "9999_Cell_B" not in T.TRIAL_CELLS                             # the dark-map pooling reads TRIAL_CELLS: it stays the three trial cells
 
 
 def test_variants_file_for_a_cohort_cell_has_one_channel_one_psf_and_its_own_z_step(cohort):
     T.cell_dir("9999_Cell_A").mkdir(parents=True, exist_ok=True)
-    vj = json.loads(T.make_variants("9999_Cell_A", ["prod", "n2v_synL_bg"]).read_text())
+    vj = json.loads(T.make_variants("9999_Cell_A", ["prod", "n2v_synL_bgv2"]).read_text())
     assert vj["channel_patterns"] == ["_C0_T"] and vj["z_step_um"] == 0.5
-    comb = [v for v in vj["variants"] if v["name"] == "n2v_synL_bg"][0]
+    comb = [v for v in vj["variants"] if v["name"] == "n2v_synL_bgv2"][0]
     assert len(comb["psf_paths"]) == 1                                    # the driver checks one PSF per channel pattern
 
 
@@ -50,9 +51,9 @@ def test_the_interpolation_found_by_the_control_gate_applies_to_every_arm_but_th
     sp = T.spec("9999_Cell_A")
     T.SPECS["9999_Cell_A"] = T.CellSpec(sp.t, sp.cohort_id, sp.stores, sp.z_step_um, sp.reference, sp.channels, sp.extra_ts, "cubic")
     arms = T.arm_table(T.load_psfs(), "9999_Cell_A")
-    assert arms["n2v_synL_bg"]["interp_method"] == "cubic" and arms["synL"]["interp_method"] == "cubic"
+    assert arms["n2v_synL_bgv2"]["interp_method"] == "cubic" and arms["synL"]["interp_method"] == "cubic"
     assert "interp_method" not in arms["prod"] and arms["prod_cubic"]["interp_method"] == "cubic"   # the controls stay what they are
-    assert "interp_method" not in T.arm_table(T.load_psfs(), "9999_Cell_B")["n2v_synL_bg"]           # no override: the pipeline default
+    assert "interp_method" not in T.arm_table(T.load_psfs(), "9999_Cell_B")["n2v_synL_bgv2"]           # no override: the pipeline default
 
 
 def test_dsr_tif_follows_t_and_defaults_to_the_segmentation_timepoint(cohort):
@@ -73,3 +74,10 @@ def test_training_frames_are_spread_through_the_series_and_always_include_the_se
     for t in (0, 50, 99):
         got = C.train_timepoints(t, list(range(100)))
         assert t in got and len(got) == 5 and got == sorted(got)
+
+
+def test_the_runners_combined_arm_is_the_corrected_floor_and_the_old_arm_is_still_flagged_superseded(cohort):
+    arms = T.arm_table(T.load_psfs(), "9999_Cell_A")
+    assert C.ARMS == ["n2v_synL_bgv2"]
+    assert "superseded" not in arms["n2v_synL_bgv2"] and arms["n2v_synL_bgv2"]["stage_dir"].endswith("stage_n2v_bgv2")
+    assert arms["n2v_synL_bg"]["superseded"] and arms["n2v_synL_bg"]["stage_dir"].endswith("stage_n2v_bg")   # negative control: the old floor
