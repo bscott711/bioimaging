@@ -13,9 +13,11 @@ Regenerate: `scripts/storage_triage_notebook/README.md`. Rules and their inciden
   Raw acquisitions alone are about 68.6 TB after dedup: above one 60 TB bucket.
 - Audited independently: 5 random duplicate rows `cmp`-identical, the 8 formerly "identical" partial groups not
   suggested, Tier B labels human and fresh, sampled A2 finals read directly.
-- Not deployed: opym-dashboard #7 (label source, no-cell never accepted, verdict badge) is merged but the dashboard
-  service has not been restarted. CORE #6 (`no_cell`) merged; the CORE checkout is on `feat/seglab`.
-- The backfill service WAS restarted on the staging fix (bioimaging #20) at 2026-10-15 20:24.
+- Deployed 2026-10-15 21:00: the dashboard was restarted on opym-dashboard #7 (storage badges + filter, label source,
+  no-cell never accepted; verified on /mip: 4 delete-suggested, 77 needs-review, 220 protected, 100 redundant copies).
+  CORE #6 (`no_cell`) is merged; the CORE checkout is on `feat/seglab`, and the autotriage tool is run on demand.
+- The backfill service was restarted on the staging fix (bioimaging #20) at 2026-10-15 20:24. A second restart (to load
+  the SSH-backfill completion-marker check, #24) is queued for when it is idle.
 
 ## Blank-output incident (found during this work)
 `microscopy/Cell_001..Cell_011` decon/DSR output was all zeros. Cause: the backfill staged zarr stores while Globus was
@@ -31,4 +33,4 @@ Cell_001 left alone (GFP 1 timepoint, mScarlet 0). Open: 6 TIFF datasets also ha
 - PI review queue (`review_queue.csv`): 35 stale delete labels (re-click Delete in the dashboard to re-confirm), 39
   dud/dead/corrupt flags, 3 delete-vs-protected, 6 bead/PSF.
 - Retire registry rows of any copy you delete (the registry still lists them).
-- Backfill-by-SSH epic: see `docs/SSH_BACKFILL_DESIGN.md` if present.
+- SSH backfill (replaces Globus for OME-Zarr): opym_local `docs/SSH_BACKFILL.md`; notebook https://claude.ai/artifact/3KrSf6jB3zKo8Kedk1HTPv. Argus service enabled; PC sender not yet run.
