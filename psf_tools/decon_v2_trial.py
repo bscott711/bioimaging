@@ -98,9 +98,15 @@ def arm_table(psfs: dict[str, str], cell: str | None = None) -> dict[str, dict]:
     if cell is not None:
         # self-supervised denoise (psf_tools.n2v_denoise) ahead of decon; `n2v_prod` changes ONLY the input
         arms["n2v_prod"] = _omw("n2v_prod", stage_dir=str(stage_dir(cell, "stage_n2v")))
+        # views, not decon arms: the denoised input and the haze floor each through the plain DSR, to look at what they do alone
+        arms["n2v_only"] = {"name": "n2v_only", "decon": False, "stage_dir": str(stage_dir(cell, "stage_n2v"))}
+        arms["floor_only"] = {"name": "floor_only", "decon": False, "stage_dir": str(stage_dir(cell, "stage_floor"))}
         if "synL_488" in psfs:
             arms["n2v_synL"] = _omw("n2v_synL", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_n2v")),
                                     psf_paths=[psfs["synL_488"], psfs["synL_561"]])
+            # all three together: denoise, then subtract the haze floor of the denoised volume, then decon with the large PSF
+            arms["n2v_synL_bg"] = _omw("n2v_synL_bg", pad_z=PAD_Z, edge_erosion=0, stage_dir=str(stage_dir(cell, "stage_n2v_bg")),
+                                       psf_paths=[psfs["synL_488"], psfs["synL_561"]])
     return arms
 
 
@@ -136,6 +142,35 @@ def stage_bg_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Pa
         tifffile.imwrite(out / f.name, subtract_haze(vol, xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um,
                                                      smooth_um=smooth_um), compression="zlib")
         print(f"[stage_bg] {f.name}: median {np.median(vol):.0f} -> {np.median(tifffile.imread(out / f.name)):.0f}")
+    return out
+
+
+def stage_n2v_bg_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Path:
+    """`stage_n2v_bg/`: the DENOISED staged TIFFs (`stage_n2v/`) with the haze floor of the denoised volume subtracted.
+    The floor is estimated after denoising because its lower envelope is then not pulled down by noise."""
+    from psf_tools.decon_haze_bg import subtract_haze
+
+    out = stage_dir(cell, "stage_n2v_bg")
+    out.mkdir(parents=True, exist_ok=True)
+    src = sorted(stage_dir(cell, "stage_n2v").glob("*.tif"))
+    if not src:
+        raise SystemExit(f"{cell}: no denoised frames in stage_n2v/; run psf_tools.n2v_denoise first")
+    for f in src:
+        tifffile.imwrite(out / f.name, subtract_haze(tifffile.imread(f), xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM,
+                                                     open_um=open_um, smooth_um=smooth_um), compression="zlib")
+    return out
+
+
+def stage_floor_cell(cell: str, open_um: float = 3.0, smooth_um: float = 3.0) -> Path:
+    """`stage_floor/`: the haze floor itself (what `stage_bg` subtracts), as uint16 TIFFs with the staged names, so it can be
+    deskewed and rotated like data and looked at."""
+    from psf_tools.decon_haze_bg import haze_floor
+
+    out = stage_dir(cell, "stage_floor")
+    out.mkdir(parents=True, exist_ok=True)
+    for f in sorted(stage_dir(cell).glob("*.tif")):
+        floor = haze_floor(tifffile.imread(f), xy_um=XY_PIXEL_SIZE_UM, dz_um=Z_STEP_UM, open_um=open_um, smooth_um=smooth_um)
+        tifffile.imwrite(out / f.name, np.clip(np.rint(floor), 0, np.iinfo(np.uint16).max).astype(np.uint16), compression="zlib")
     return out
 
 
@@ -283,7 +318,7 @@ def write_manifest(cell: str) -> Path:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["stage", "stage-bg", "variants", "run", "gate", "check-shapes", "manifest"])
+    ap.add_argument("cmd", choices=["stage", "stage-bg", "stage-floor", "stage-n2v-bg", "variants", "run", "gate", "check-shapes", "manifest"])
     ap.add_argument("--cell", required=True, choices=sorted(TRIAL_CELLS))
     ap.add_argument("--arms", nargs="*", default=["nodecon", "prod", "pad"])
     ap.add_argument("--variant", default="prod")
@@ -292,6 +327,10 @@ def main(argv=None) -> int:
     cell_dir(a.cell).mkdir(parents=True, exist_ok=True)
     if a.cmd == "stage":
         print(stage_cell(a.cell))
+    elif a.cmd == "stage-n2v-bg":
+        print(stage_n2v_bg_cell(a.cell))
+    elif a.cmd == "stage-floor":
+        print(stage_floor_cell(a.cell))
     elif a.cmd == "stage-bg":
         print(stage_bg_cell(a.cell))
     elif a.cmd == "variants":

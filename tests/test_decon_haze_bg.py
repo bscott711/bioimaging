@@ -40,3 +40,13 @@ def test_a_footprint_that_fits_inside_the_object_eats_it():
     narrow = subtract_haze(vol, xy_um=0.5, dz_um=0.5, open_um=3.0, smooth_um=1.0, ds=2)
     assert wide[:, 30, :].astype(float).mean() > 280    # kept on top of the haze
     assert narrow[:, 30, :].astype(float).mean() < 130  # eaten
+
+
+def test_subtraction_is_the_data_minus_the_floor_above_the_offset():
+    """What `stage_bg` removes is exactly the haze floor's excess over the camera offset (so the floor view shows what is taken)."""
+    vol, _ = _phantom()
+    kw = dict(xy_um=0.5, dz_um=0.5, open_um=3.0, smooth_um=2.0, ds=2)
+    floor = haze_floor(vol, **kw)
+    out = subtract_haze(vol, **kw)
+    expected = np.clip(vol.astype(np.float32) - np.clip(floor - 100.0, 0, None), 0, 65535)
+    assert np.abs(out.astype(np.float32) - expected).max() <= 1.0   # uint16 rounding only
