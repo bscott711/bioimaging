@@ -944,3 +944,36 @@ def test_frame_staged_after_the_source_settled_is_kept(two_channel_store):
     os.utime(marker, (future, future))
     build_decon_staging_dir(stores, stage, dataset_prefix="cell_001")
     assert tifffile.imread(marker).max() == 7
+
+
+# ---- a store the SSH backfill finished carries an explicit completion marker ----------------
+from backfill.pipeline import store_has_completion_marker
+
+
+def _mark(store: Path, **kw) -> None:
+    body = {"format": 1, "state": "complete", **kw}
+    (store / ".opym_complete.json").write_text(json.dumps(body))
+
+
+def test_marked_store_is_ready_even_though_it_was_just_written(two_channel_store, monkeypatch):
+    stores, _, _ = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    assert not _zarr_store_is_ready(stores[0])             # unmarked and fresh: still waits
+    _mark(stores[0])
+    assert _zarr_store_is_ready(stores[0])                 # marker: no idle window
+
+
+@pytest.mark.parametrize("body", [{"format": 2, "state": "complete"}, {"format": 1, "state": "writing"}, {}])
+def test_a_marker_that_does_not_say_complete_does_not_count(two_channel_store, monkeypatch, body):
+    stores, _, _ = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    (stores[0] / ".opym_complete.json").write_text(json.dumps(body))
+    assert not store_has_completion_marker(stores[0])
+    assert not _zarr_store_is_ready(stores[0])
+
+
+def test_unreadable_marker_does_not_count(two_channel_store, monkeypatch):
+    stores, _, _ = two_channel_store
+    monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
+    (stores[0] / ".opym_complete.json").write_text("{not json")
+    assert not _zarr_store_is_ready(stores[0])

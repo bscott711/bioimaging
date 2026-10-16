@@ -730,7 +730,24 @@ def store_newest_mtime(store: Path) -> float:
     return newest
 
 
+# The SSH backfill (opym.stream.backfill_receiver) writes `.opym_complete.json` into a store only after
+# reading every volume back and matching the sender's SHA-256. A store with it is complete by an explicit
+# signal, so the idle-time heuristic below does not apply. (Read here, not imported: this repo must not
+# depend on which opym checkout is deployed. The contract is `format == 1` and `state == "complete"`.)
+COMPLETE_MARKER_NAME = ".opym_complete.json"
+
+
+def store_has_completion_marker(store: Path) -> bool:
+    try:
+        marker = json.loads((store / COMPLETE_MARKER_NAME).read_text())
+    except (OSError, ValueError):
+        return False
+    return marker.get("format") == 1 and marker.get("state") == "complete"
+
+
 def _store_still_arriving(store: Path, now: float | None = None) -> bool:
+    if store_has_completion_marker(store):
+        return False
     window = _zarr_settle_seconds()
     if window <= 0:
         return False
