@@ -27,6 +27,13 @@ def test_dsr_tif_follows_the_drivers_layout(ws):
     # an arm with its own stage dir (denoised input) nests under that
     assert T.dsr_tif("Cell_004", arms["n2v_prod"], 0) == ws / "Cell_004" / "stage_n2v" / "Decon_n2v_prod" / "DSR" / "Cell_004_C0_T023.tif"
     assert T.dsr_tif("Cell_004", arms["synL_bg"], 0).parts[-4:-2] == ("pad24_synL_bg", "Decon_synL_bg")
+    # the combined arm: denoised + haze-floor-subtracted input, large synthetic PSF, padding
+    comb = arms["n2v_synL_bg"]
+    assert comb["stage_dir"].endswith("stage_n2v_bg") and comb["pad_z"] == 24 and len(comb["psf_paths"]) == 2
+    assert T.dsr_tif("Cell_004", comb, 0).parts[-4:-2] == ("pad24_n2v_synL_bg", "Decon_n2v_synL_bg")
+    # the two "view" arms are plain DSRs of their own stage dirs
+    assert T.dsr_tif("Cell_004", arms["n2v_only"], 0) == ws / "Cell_004" / "stage_n2v" / "DSR" / "Cell_004_C0_T023.tif"
+    assert T.dsr_tif("Cell_004", arms["floor_only"], 1) == ws / "Cell_004" / "stage_floor" / "DSR" / "Cell_004_C1_T023.tif"
 
 
 def test_production_arm_is_the_production_config():
