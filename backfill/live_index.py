@@ -130,11 +130,14 @@ class LiveIndex:
         self.jobs = jobs
         self.clock = clock
         self.sessions: dict[str, _Session] = {}
+        # Sessions already handled: live_latest.json keeps naming the last one
+        # until the next starts, and it must not be picked up again.
+        self.finished: set[str] = set()
 
     def tick(self) -> None:
         now = self.clock()
         info = _read_latest(self.jobs or lanes.jobs_dir())
-        if info and info["session_id"] not in self.sessions:
+        if info and info["session_id"] not in self.sessions and info["session_id"] not in self.finished:
             ds = dataset_for_session(info, self.roots)
             if ds is not None:
                 self.sessions[info["session_id"]] = _Session(
@@ -149,6 +152,7 @@ class LiveIndex:
                 print(f"[live-index] {s.ds.dataset_key}: {e!r}")
             if s.finished or now - s.seen_at > _FORGET_AFTER_S:
                 del self.sessions[sid]
+                self.finished.add(sid)
 
     def _step(self, s: _Session, now: float) -> None:
         status = read_live_status(s.dsr_dir)
@@ -173,7 +177,7 @@ class LiveIndex:
             ds.dataset_key, root=str(ds.root), leaf_dir=str(ds.leaf_dir), master_file=str(ds.master_file)
         )
         s.registered = True
-        print(f"[live-index] {ds.dataset_key}: acquiring, registered")
+        print(f"[live-index] {ds.dataset_key}: registered")
 
     def _refresh(self, s: _Session) -> None:
         done = complete_timepoints(read_progress(s.store))
