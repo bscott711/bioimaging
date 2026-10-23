@@ -17,6 +17,7 @@ import json
 import multiprocessing as mp
 import os
 import shutil
+import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
@@ -308,7 +309,28 @@ def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
         print(f"[backfill] {ds.dataset_key}: viewer export failed (DSR output is unaffected): {e}")
 
 
-def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -> None:
+# The live index (backfill.live_index) encodes from its own thread; this keeps
+# it and a pass from encoding the same dataset at once. Reentrant so the live
+# index can hold it across its own "still not done?" check.
+MIP_ENCODE_LOCK = threading.RLock()
+
+
+def _run_mip_encode(
+    ds: LeafDataset,
+    registry: StatusRegistry,
+    mip_fps: float,
+    *,
+    declared_timepoints: int | None = None,
+) -> None:
+    """`declared_timepoints` stands in for reading the raw store's shape, for
+    a live dataset whose raw data may still be draining to GPFS."""
+    with MIP_ENCODE_LOCK:
+        _run_mip_encode_locked(ds, registry, mip_fps, declared_timepoints)
+
+
+def _run_mip_encode_locked(
+    ds: LeafDataset, registry: StatusRegistry, mip_fps: float, declared_timepoints: int | None
+) -> None:
     dsr_dir = _dsr_dir_for(ds)
     registry.start_stage(ds.dataset_key, "mip_encode")
     try:
@@ -331,7 +353,7 @@ def _run_mip_encode(ds: LeafDataset, registry: StatusRegistry, mip_fps: float) -
             registry.set_triage(
                 ds.dataset_key,
                 signal_flag="ok",
-                expected_timepoints=dataset_declared_timepoints(ds),
+                expected_timepoints=declared_timepoints or dataset_declared_timepoints(ds),
                 actual_timepoints=n,
             )
             registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
@@ -792,6 +814,13 @@ def watch_backfill(
     whole unattended service down with it).
     """
     print(f"[backfill] Watch mode: re-scanning every {watch_interval_s:.0f}s. Ctrl-C to stop.")
+    if not (dry_run or discover_only):
+        # Streamed acquisitions reach the registry (and the dashboard) while
+        # they're acquired, lease or not; see backfill.live_index.
+        from backfill.live_index import LIVE_TICK_S, start_live_index_thread
+
+        start_live_index_thread(registry_path, roots, decon_psf=resolve_decon_psf(), mip_fps=mip_fps)
+        print(f"[backfill] Live index: following streamed sessions every {LIVE_TICK_S:.0f}s.")
     paused = False
     while True:
         # Streaming wins: while a live acquisition holds the lease, start no
