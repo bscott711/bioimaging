@@ -198,12 +198,15 @@ def build_poster_for_zarr_dataset(
     return build_poster_from_frames(frames, out_dir)
 
 
-def build_poster_from_frames(frames: dict[str, np.ndarray], out_dir: Path) -> Path:
+def build_poster_from_frames(
+    frames: dict[str, np.ndarray], out_dir: Path, name: str = "triage_preview.jpg"
+) -> Path:
     """`triage_preview.jpg` from one Z-MIP per channel (blended when there
     are several) -- the single-timepoint poster, whether the MIPs came from
-    PetaKit5D's TIFFs or a processed OME-Zarr's MIP series."""
+    PetaKit5D's TIFFs or a processed OME-Zarr's MIP series. The live index
+    writes its per-timepoint poster under another `name`."""
     frames_u8 = {name: normalize_for_video(frame) for name, frame in frames.items()}
-    out_path = out_dir / "triage_preview.jpg"
+    out_path = out_dir / name
     if len(frames_u8) == 1:
         return encode_poster_image(next(iter(frames_u8.values())), out_path)
 
