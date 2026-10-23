@@ -193,3 +193,15 @@ def test_a_short_session_replaced_in_live_latest_still_finishes(setup, tmp_path)
     (s.jobs / LIVE_LATEST_NAME).write_text(json.dumps(nxt))
     index.tick()
     assert reg.is_stage_done(s.key, "mip_encode")
+
+
+def test_a_finished_session_still_named_in_live_latest_is_not_picked_up_again(setup, capsys):
+    s, reg, index = setup
+    s.finish_timepoint(0)
+    s.status("complete")
+    index.tick()
+    capsys.readouterr()
+    index.tick()
+    index.tick()
+    assert not index.sessions
+    assert capsys.readouterr().out == ""
