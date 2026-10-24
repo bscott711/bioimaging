@@ -205,3 +205,26 @@ def test_a_finished_session_still_named_in_live_latest_is_not_picked_up_again(se
     index.tick()
     assert not index.sessions
     assert capsys.readouterr().out == ""
+
+
+def test_a_session_that_got_nothing_is_not_left_marked_ok(setup, capsys):
+    """Rig 2026-10-24: ten runs streamed no frames and stayed "signal ok"."""
+    s, reg, index = setup
+    index.tick()  # registered while running, before anything arrived
+    assert reg.get_dataset(s.key)["signal_flag"] == "ok"
+    s.status("failed")
+    status = json.loads((s.dsr_dir / LIVE_STATUS_NAME).read_text())
+    status["end"] = {"summary": "no data reached Argus -- stream stalled (0/4 timepoints arrived)"}
+    (s.dsr_dir / LIVE_STATUS_NAME).write_text(json.dumps(status))
+    index.tick()
+    assert reg.get_dataset(s.key)["signal_flag"] == "unknown"
+    assert "no data reached Argus" in capsys.readouterr().out
+
+
+def test_a_failed_session_that_got_data_keeps_its_flag(setup):
+    s, reg, index = setup
+    s.finish_timepoint(0)
+    index.tick()
+    s.status("failed")
+    index.tick()
+    assert reg.get_dataset(s.key)["signal_flag"] == "ok"

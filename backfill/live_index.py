@@ -167,6 +167,13 @@ class LiveIndex:
             self._finalize(s, status)
             s.finished = True
         elif state == "failed" or not live_status_is_fresh(status, now):
+            end = status.get("end") or {}
+            if end.get("summary"):
+                print(f"[live-index] {s.ds.dataset_key}: {end['summary']}")
+            if s.registered and not s.counted:
+                # Registered "ok" on its first heartbeat, but nothing arrived
+                # (rig 2026-10-24): not a run with good signal.
+                self.registry.set_signal_flag(s.ds.dataset_key, "unknown")
             s.finished = True  # the batch path owns it from here, as before
 
     def _register(self, s: _Session) -> None:

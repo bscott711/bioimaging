@@ -53,6 +53,9 @@ Environment=OPYM_LIVE_FORMAT=zarr
 # single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
 # does the same in-process (opym.live_view.no_hugepage_stalls).
 Environment=NUMPY_MADVISE_HUGEPAGE=0
+# The rig's own stream log (pymmcore-gui CLIENT_LOG, opym#55): one file per day,
+# so a post-mortem never needs the acquisition PC (unreachable from here).
+Environment=OPYM_STREAM_CLIENT_LOG_DIR=%h/projects/bioimaging/logs/rig
 ExecStart=%h/.local/bin/uv run opym-receive
 Restart=on-failure
 RestartSec=10
