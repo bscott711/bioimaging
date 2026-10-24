@@ -7,7 +7,10 @@ Type=simple
 WorkingDirectory=%h/projects/bioimaging
 # Where backfilled stores may land: the directory a Globus transfer lands sessions in. The receiver
 # refuses any other destination, so a confused or hostile sender cannot write elsewhere.
-Environment=OPYM_BACKFILL_RAW_ROOTS=/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload
+Environment=OPYM_BACKFILL_RAW_ROOTS=/mmfs1/scratch/jacks.local/microscopy:/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload
+# The registry's folders are where a store already on Argus is looked for, so a run that came
+# another way (Globus, the live stream) is never sent a second time (opym#57).
+Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
 # Loopback only: the acquisition PC reaches it through an SSH tunnel to this port
 # (ssh -N -L 5556:127.0.0.1:5556 <user>@argus.sdstate.edu). The live stream keeps its own port (5555) and
 # its own service; nothing here shares state with it.
