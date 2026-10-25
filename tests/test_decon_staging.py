@@ -949,7 +949,6 @@ def test_a_store_backfilled_before_its_deskew_is_left_alone(two_channel_store, m
 # eroded mask built from the first of them, and all decon output were zeros, recorded
 # `done`. write_decon_staged_tiff then kept those frames on every later run.
 import os
-import time
 
 from backfill.pipeline import _zarr_store_is_ready, store_newest_mtime
 
