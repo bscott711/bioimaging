@@ -2,7 +2,7 @@
 
 A --watch pass runs every 120 s, and before 2026-10-25 it printed the same ~140
 lines every time (63 of them one error each for stores that never had pixel data),
-none timestamped: 42 MB a day in which a real failure could not be found or dated.
+none timestamped: about 17 MB a day in which a real failure could not be found or dated.
 A notice keyed to a dataset is now printed again only when its text changes. The
 registry's `error_message` stays the record; the log says what is new.
 
