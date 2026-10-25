@@ -19,6 +19,7 @@ import time
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import tifffile
@@ -41,6 +42,7 @@ from opym.utils import (
 )
 from psf_tools.extraction_plan import get_extraction_plan
 
+from backfill.log import log, log_once
 from backfill.mip_movie import encode_poster_image, normalize_for_video
 
 # Decon + DSR settings live in opym.decon_config, shared with the live lane
@@ -307,7 +309,7 @@ def _write_triage_preview(max_proj, out_path: Path) -> None:
         preview_u8 = normalize_for_video(max_proj)
         encode_poster_image(preview_u8, out_path)
     except Exception as e:  # noqa: BLE001 - a missing preview is not fatal
-        print(f"[backfill] triage preview failed for {out_path.parent.parent.name}: {e}")
+        log(f"triage preview failed for {out_path.parent.parent.name}: {e}")
 
 
 def _classify_unreadable_raw_file(exc: Exception) -> str | None:
@@ -421,8 +423,8 @@ def detect_rois(
             actual_timepoints=actual_timepoints,
         )
         if readable.excluded:
-            print(
-                f"[backfill] {ds.dataset_key}: excluded {len(readable.excluded)} corrupt "
+            log(
+                f"{ds.dataset_key}: excluded {len(readable.excluded)} corrupt "
                 f"MMStack file(s) ({', '.join(p.name for p in readable.excluded)}), "
                 f"recovered {actual_timepoints} real timepoint(s)"
             )
@@ -564,7 +566,7 @@ def _backfill_lane_closed(ds: LeafDataset) -> bool:
     The dataset is simply picked up again on a later pass."""
     if lanes.backfill_admission_open(backfill_max_inflight()):
         return False
-    print(f"[backfill] {ds.dataset_key}: deferred (live acquisition or backfill queue full)")
+    log(f"{ds.dataset_key}: deferred (live acquisition or backfill queue full)")
     return True
 
 
@@ -743,6 +745,58 @@ def store_has_completion_marker(store: Path) -> bool:
     except (OSError, ValueError):
         return False
     return marker.get("format") == 1 and marker.get("state") == "complete"
+
+
+STILL_ARRIVING = "is still arriving"
+# What opym.stream.backfill_receiver leaves in a store it is writing (read here, not
+# imported, like the marker), and how long it treats one as its own (LOCK_STALE_S).
+BACKFILL_LOCK_NAME = ".opym_backfill.lock"
+BACKFILL_LOCK_STALE_S = 600.0
+
+
+def store_not_ready_reason(store: Path, now: float | None = None) -> str | None:
+    """Why `store` can't be processed yet, in words, or None when it can (see
+    `_zarr_store_is_ready`). `STILL_ARRIVING` is the transient case, not worth a
+    log line; the others last until someone acts."""
+    if _zarr_store_is_ready(store):
+        return None
+    now = now if now is not None else time.time()
+    if not store_has_completion_marker(store):
+        try:
+            lock_age = now - (store / BACKFILL_LOCK_NAME).stat().st_mtime
+        except OSError:
+            lock_age = None
+        if lock_age is not None:
+            if lock_age < BACKFILL_LOCK_STALE_S:
+                return STILL_ARRIVING
+            return ("was left part-way by an SSH backfill that stopped; "
+                    "run opym-backfill-send again to finish it")
+    try:
+        if now - store_newest_mtime(store) < _zarr_settle_seconds():
+            return STILL_ARRIVING
+    except OSError:
+        pass
+    return "has no .zattrs or no pixel array (a transfer that never finished?)"
+
+
+def backfill_completed_since_deskew(ds: LeafDataset, registry: StatusRegistry) -> bool:
+    """Whether a channel store's completion marker is newer than the dataset's
+    finished deskew. The backfill completes the live stream's partial copy of a
+    run in place (2026-10-24): 5 such runs kept showing the stream's count (7 of
+    100 for a run with 8 on disk), and the added timepoints were never deskewed."""
+    row = registry.get_stage(ds.dataset_key, "deskew") or {}
+    try:
+        deskewed_at = datetime.fromisoformat(row["finished_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return False
+    for store in ds.channel_zarr_paths or ():
+        try:
+            marker = json.loads((Path(store) / COMPLETE_MARKER_NAME).read_text())
+            if float(marker["finished_at"]) > deskewed_at:
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return False
 
 
 def _store_still_arriving(store: Path, now: float | None = None) -> bool:
@@ -1042,8 +1096,8 @@ def log_grandfathered_decon_datasets(registry, psf: Path | None) -> int:
         and registry.is_stage_done(d["dataset_key"], "deskew")
     )
     if held:
-        print(
-            f"[backfill] {held} dataset(s) already deconvolved with unknown "
+        log(
+            f"{held} dataset(s) already deconvolved with unknown "
             "(pre-provenance) OMW settings are being left as-is -- their output "
             "will NOT be recomputed with the current ones. Rerun with "
             "--reprocess-legacy-decon (OPYM_DECON_REPROCESS_LEGACY=1) to "
@@ -1265,7 +1319,7 @@ def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf:
     if not status:
         return False
     if status.get("state") == "running" and live_status_is_fresh(status):
-        print(f"[backfill] {ds.dataset_key}: live lane still processing it, deferring")
+        log(f"{ds.dataset_key}: live lane still processing it, deferring")
         return True
     if status.get("state") != "complete":
         return False
@@ -1279,27 +1333,27 @@ def _live_lane_owns_deskew(ds: LeafDataset, registry: StatusRegistry, decon_psf:
         # result (no DSR TIFFs). The GPFS copy's progress lists what's there.
         have = complete_timepoints(read_progress(store))
         if n_t < 1 or have[:n_t] != list(range(n_t)):
-            print(
-                f"[backfill] {ds.dataset_key}: live store incomplete "
+            log(
+                f"{ds.dataset_key}: live store incomplete "
                 f"({len(have)} of {n_t} timepoints), reprocessing in batch"
             )
             return False
         registry.set_decon_psf(ds.dataset_key, str(decon_psf))
         registry.set_decon_params(ds.dataset_key, decon_params_fingerprint())
         registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(store))
-        print(f"[backfill] {ds.dataset_key}: deskewed live into {store.name} ({n_t} timepoints), skipping batch deskew")
+        log(f"{ds.dataset_key}: deskewed live into {store.name} ({n_t} timepoints), skipping batch deskew")
         return True
     frames = parse_dsr_frame_names(dsr_dir)
     if n_t < 1 or not all((c, t) in frames for c in range(n_c) for t in range(n_t)):
-        print(
-            f"[backfill] {ds.dataset_key}: live output incomplete "
+        log(
+            f"{ds.dataset_key}: live output incomplete "
             f"({len(frames)} of {n_t * n_c} frames), reprocessing in batch"
         )
         return False
     registry.set_decon_psf(ds.dataset_key, str(decon_psf))
     registry.set_decon_params(ds.dataset_key, decon_params_fingerprint())
     registry.finish_stage(ds.dataset_key, "deskew", status="done", output_path=str(dsr_dir))
-    print(f"[backfill] {ds.dataset_key}: deskewed live ({n_t} timepoints), skipping batch deskew")
+    log(f"{ds.dataset_key}: deskewed live ({n_t} timepoints), skipping batch deskew")
     return True
 
 
@@ -1350,7 +1404,13 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     if registry.is_stage_done(ds.dataset_key, "deskew") and decon_provenance_matches(
         registry, ds.dataset_key, decon_psf
     ):
-        return None
+        if not backfill_completed_since_deskew(ds, registry):
+            return None
+        # The SSH backfill finished a store after its deskew (e.g. it added the
+        # timepoints the live stream missed): the output covers less data than
+        # is on disk now, so redo it, and say so on the dashboard meanwhile.
+        log(f"{ds.dataset_key}: backfill completed a store after its deskew -- reprocessing")
+        registry.reset_stage(ds.dataset_key, "mip_encode")
 
     existing = registry.get_stage(ds.dataset_key, "deskew")
     # Reuse an in-flight ticket only when it is for the configuration we
@@ -1369,6 +1429,14 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         return None
     if _backfill_lane_closed(ds):
         return None
+    # Before anything below creates staging dirs or clears old output: a store
+    # still arriving, or one a transfer left without its pixel data, is skipped.
+    for store in ds.channel_zarr_paths:
+        reason = store_not_ready_reason(store)
+        if reason:
+            if reason != STILL_ARRIVING:
+                log_once(ds.dataset_key, f"{ds.dataset_key}: not processed -- {store.name} {reason}")
+            return None
     data_dir = zarr_deskew_data_dir(ds, decon_psf)
     # Reaching here means neither early return above fired, so we are about to
     # submit -- and therefore what is on disk was produced by a configuration
@@ -1440,7 +1508,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
             "rather than deskewing at a guessed scale (set "
             "OPYM_ZARR_ALLOW_DEFAULT_Z_STEP=1 to override)."
         )
-        print(f"   [{ds.dataset_key}] SKIP -- {msg}")
+        log_once(ds.dataset_key, f"{ds.dataset_key}: SKIP -- {msg}")
         # Distinct from a real failure: this is a deliberate guard, cheap to
         # recheck (no multi-GB read, just zarr coordinate-array metadata),
         # and self-heals the moment the data lands -- see SIGNAL_FLAGS'
@@ -1453,7 +1521,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         registry.set_signal_flag(ds.dataset_key, "blocked")
         registry.finish_stage(ds.dataset_key, "deskew", status="failed", error=msg)
         return None
-    print(f"   [{ds.dataset_key}] z step {z_step_um} um (from {z_step_source})")
+    log(f"{ds.dataset_key}: z step {z_step_um} um (from {z_step_source})")
 
     n_timepoints = dataset_timepoints(ds)
     env_cap = int(os.environ.get("OPYM_ZARR_MAX_TIMEPOINTS", "0")) or None
@@ -1529,7 +1597,7 @@ def process_zarr_precropped_dataset(ds: LeafDataset, registry: StatusRegistry) -
     try:
         return submit_zarr_deskew_ticket(ds, registry)
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
-        print(f"[backfill] {ds.dataset_key}: {e}")
+        log_once(ds.dataset_key, f"{ds.dataset_key}: {e}")
         return None
 
 
@@ -1577,5 +1645,5 @@ def process_crop_and_submit(
         _zarr_out_dir, tiff_out_dir = crop_and_convert(ds, top_roi, bot_roi, registry)
         return submit_deskew_ticket(ds, tiff_out_dir, registry)
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest of the run
-        print(f"[backfill] {ds.dataset_key}: {e}")
+        log_once(ds.dataset_key, f"{ds.dataset_key}: {e}")
         return None

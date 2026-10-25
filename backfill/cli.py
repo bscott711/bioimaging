@@ -31,6 +31,7 @@ from opym.registry import MAX_STAGE_FAILURES, StatusRegistry
 from opym.ome_zarr_writer import mip_stacks
 from opym.utils import resolve_output_base, sanitize_filename
 
+from backfill.log import forget, log, log_once
 from backfill.mip_movie import (
     build_mip_movies_for_dataset,
     build_mip_movies_from_stacks,
@@ -139,7 +140,7 @@ def _triage_worker(ds: LeafDataset, registry_path: Path) -> tuple[str, str]:
         try:
             _top, _bot, signal_flag = detect_rois(ds, registry)
         except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
-            print(f"[backfill] {ds.dataset_key}: triage failed: {e}")
+            log_once(ds.dataset_key, f"{ds.dataset_key}: triage failed: {e}")
             signal_flag = "unknown"
         return ds.dataset_key, signal_flag
     finally:
@@ -239,7 +240,7 @@ def _reap_decon_intermediates(ds: LeafDataset) -> None:
                 shutil.rmtree(qc_dir)
             shutil.copytree(psfgen, qc_dir)
         except OSError as e:  # noqa: BLE001 - QC is nice-to-have, never fatal
-            print(f"[backfill] {ds.dataset_key}: could not preserve psfgen QC: {e}")
+            log(f"{ds.dataset_key}: could not preserve psfgen QC: {e}")
 
     # Delete the per-frame decon TIFFs, NOT the directory: PetaKit5D nests the
     # final DSR result INSIDE it, at Decon/DSR_decon (see dsr_output_dir --
@@ -301,12 +302,12 @@ def _export_for_viewers(ds: LeafDataset, dsr_dir: Path) -> None:
             name=ds.leaf_dir.name, channel_labels=labels,
             single_names=single_names, output_format=output_format,
         )
-        print(f"[backfill] {ds.dataset_key}: viewer export ({output_format}) -- "
+        log(f"{ds.dataset_key}: viewer export ({output_format}) -- "
               f"{summary['frames']} frame(s), {summary['stamped']} stamped, "
               f"{summary.get('ome_zarr', 'no OME-Zarr')}, "
               f"{summary.get('removed_tiffs', 0)} TIFF frame(s) replaced by the OME-Zarr")
     except Exception as e:  # noqa: BLE001 - convenience output, never fatal
-        print(f"[backfill] {ds.dataset_key}: viewer export failed (DSR output is unaffected): {e}")
+        log(f"{ds.dataset_key}: viewer export failed (DSR output is unaffected): {e}")
 
 
 # The live index (backfill.live_index) encodes from its own thread; this keeps
@@ -369,7 +370,7 @@ def _run_mip_encode_locked(
                 actual_timepoints=n,
             )
             registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
-            print(f"[backfill] {ds.dataset_key}: MIP movies from {store.name}; it is the viewer export")
+            log(f"{ds.dataset_key}: MIP movies from {store.name}; it is the viewer export")
             return
         if ds.kind == KIND_ZARR_PRECROPPED and dataset_timepoints(ds) > 1:
             # Time series: the mirror was exploded to per-timepoint frames
@@ -411,11 +412,12 @@ def _run_mip_encode_locked(
             sanitized_name = sanitize_filename(ds.master_file.name)
             build_mip_movies_for_dataset(dsr_dir, sanitized_name, movies_dir, fps=mip_fps)
         registry.finish_stage(ds.dataset_key, "mip_encode", status="done", output_path=str(movies_dir))
+        forget(ds.dataset_key)
         _reap_decon_intermediates(ds)
         _export_for_viewers(ds, dsr_dir)
     except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
         registry.finish_stage(ds.dataset_key, "mip_encode", status="failed", error=str(e))
-        print(f"[backfill] {ds.dataset_key}: mip_encode failed: {e}")
+        log_once(ds.dataset_key, f"{ds.dataset_key}: mip_encode failed: {e}")
 
 
 def _inflight_tickets(
@@ -499,8 +501,8 @@ def _drain_resolved_tickets(
                 dataset_key, "deskew", status="done", output_path=str(_dsr_dir_for(ds))
             )
             registry.reset_stage(dataset_key, "mip_encode")
-            print(
-                f"[backfill] {dataset_key}: finished ticket ran with {made_with[1]}, "
+            log(
+                f"{dataset_key}: finished ticket ran with {made_with[1]}, "
                 f"current is {current[1]} -- superseded, re-queued"
             )
             continue
@@ -578,8 +580,8 @@ def _without_gave_up(datasets: list[LeafDataset], registry: StatusRegistry) -> l
     kept = [ds for ds in datasets if ds.dataset_key not in gave_up]
     skipped = len(datasets) - len(kept)
     if skipped:
-        print(
-            f"[backfill] Skipping {skipped} dataset(s) whose stage failed "
+        log(
+            f"Skipping {skipped} dataset(s) whose stage failed "
             f"{MAX_STAGE_FAILURES} times in a row (rerun with --retry-failed to try again)."
         )
     return kept
@@ -614,12 +616,12 @@ def run_backfill(
     until every submitted ticket resolves (see `_finish_pending`).
     """
     datasets = discover_leaf_datasets(roots)
-    print(f"[backfill] discovered {len(datasets)} leaf dataset(s) across {len(roots)} root(s)")
+    log(f"discovered {len(datasets)} leaf dataset(s) across {len(roots)} root(s)")
 
     legacy_flags = {ds.dataset_key: has_legacy_decon(ds.leaf_dir) for ds in datasets}
     legacy_count = sum(legacy_flags.values())
-    print(
-        f"[backfill] {legacy_count} dataset(s) already have legacy Decon/ output "
+    log(
+        f"{legacy_count} dataset(s) already have legacy Decon/ output "
         "(processed anyway -- new output is an additive sibling folder)"
     )
 
@@ -649,14 +651,14 @@ def run_backfill(
 
     if discover_only:
         registry.close()
-        print(f"[backfill] Registered {len(datasets)} dataset(s) as pending. No processing run (--discover-only).")
+        log(f"Registered {len(datasets)} dataset(s) as pending. No processing run (--discover-only).")
         return
 
     num_workers = workers or max(1, min(8, mp.cpu_count() // 2))
     dataset_by_key = {ds.dataset_key: ds for ds in datasets}
     pending = _inflight_tickets(registry, dataset_by_key)
     if pending:
-        print(f"[backfill] Collecting {len(pending)} in-flight ticket(s) from earlier passes...")
+        log(f"Collecting {len(pending)} in-flight ticket(s) from earlier passes...")
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
     # Everything below (triage, crop/submit, the mip_encode-only retry)
@@ -678,8 +680,8 @@ def run_backfill(
     # So are datasets already triaged (see _needs_triage); their priority
     # comes from the signal_flag recorded the first time.
     triage_candidates = [ds for ds in datasets if _needs_triage(ds, registry)]
-    print(
-        f"[backfill] Phase 0: triaging {len(triage_candidates)} dataset(s) "
+    log(
+        f"Phase 0: triaging {len(triage_candidates)} dataset(s) "
         "(signal check + frame count + preview)..."
     )
     signal_flags: dict[str, str] = {
@@ -691,8 +693,8 @@ def run_backfill(
     futures = {pool.submit(_triage_worker, ds, registry_path): ds for ds in triage_candidates}
     for future, ds in _as_completed_with_timeout(pool, futures, _TRIAGE_TASK_TIMEOUT_S):
         if not future.done():
-            print(
-                f"[backfill] {ds.dataset_key}: triage timed out after "
+            log(
+                f"{ds.dataset_key}: triage timed out after "
                 f"{_TRIAGE_TASK_TIMEOUT_S:.0f}s, deprioritizing and moving on "
                 "(worker abandoned, may still be running in the background)"
             )
@@ -705,19 +707,19 @@ def run_backfill(
         try:
             dataset_key, flag = future.result()
         except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
-            print(f"[backfill] {ds.dataset_key}: triage worker crashed: {e!r}")
+            log_once(ds.dataset_key, f"{ds.dataset_key}: triage worker crashed: {e!r}")
             signal_flags[ds.dataset_key] = "unknown"
         else:
             signal_flags[dataset_key] = flag
 
     dud_count = sum(1 for f in signal_flags.values() if f == "dud")
-    print(
-        f"[backfill] Triage complete. {dud_count} likely-dud dataset(s) "
+    log(
+        f"Triage complete. {dud_count} likely-dud dataset(s) "
         "deprioritized to the end of the crop queue (still processed, just last)."
     )
     datasets.sort(key=lambda ds: _SIGNAL_PRIORITY.get(signal_flags.get(ds.dataset_key, "unknown"), 1))
 
-    print(f"[backfill] Phase A+B: cropping ({num_workers} workers) and polling deskew/MIP as tickets resolve...")
+    log(f"Phase A+B: cropping ({num_workers} workers) and polling deskew/MIP as tickets resolve...")
     pool = _new_pool(num_workers)
     futures = {
         pool.submit(_crop_worker, ds, registry_path, legacy_flags[ds.dataset_key]): ds
@@ -725,8 +727,8 @@ def run_backfill(
     }
     for future, ds in _as_completed_with_timeout(pool, futures, _CROP_TASK_TIMEOUT_S):
         if not future.done():
-            print(
-                f"[backfill] {ds.dataset_key}: crop/deskew-submit timed out after "
+            log(
+                f"{ds.dataset_key}: crop/deskew-submit timed out after "
                 f"{_CROP_TASK_TIMEOUT_S:.0f}s, will retry next pass "
                 "(worker abandoned, may still be running in the background)"
             )
@@ -735,7 +737,7 @@ def run_backfill(
         try:
             dataset_key, ticket_path_str = future.result()
         except Exception as e:  # noqa: BLE001 - isolate this dataset's failure from the rest
-            print(f"[backfill] {ds.dataset_key}: crop worker crashed: {e!r}")
+            log_once(ds.dataset_key, f"{ds.dataset_key}: crop worker crashed: {e!r}")
             _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
             continue
         if ticket_path_str:
@@ -761,14 +763,14 @@ def run_backfill(
             _run_mip_encode(dataset_by_key[dataset_key], registry, mip_fps)
         _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
 
-    print(f"[backfill] Phase A complete. {len(pending)} dataset(s) still awaiting deskew resolution.")
+    log(f"Phase A complete. {len(pending)} dataset(s) still awaiting deskew resolution.")
     _finish_pending(
         pending, dataset_by_key, registry, mip_fps,
         wait=wait_for_pending, poll_interval_s=poll_interval_s,
     )
 
     registry.close()
-    print("[backfill] Done.")
+    log("Done.")
 
 
 def _finish_pending(
@@ -791,7 +793,7 @@ def _finish_pending(
     _drain_resolved_tickets(pending, dataset_by_key, registry, mip_fps)
     if not wait:
         if pending:
-            print(f"[backfill] {len(pending)} ticket(s) still in flight -- re-checked next pass.")
+            log(f"{len(pending)} ticket(s) still in flight -- re-checked next pass.")
         return
     while pending:
         time.sleep(poll_interval_s)
@@ -825,14 +827,14 @@ def watch_backfill(
     `opym.local_gpu_worker`'s watchdog (a crashed pass shouldn't take the
     whole unattended service down with it).
     """
-    print(f"[backfill] Watch mode: re-scanning every {watch_interval_s:.0f}s. Ctrl-C to stop.")
+    log(f"Watch mode: re-scanning every {watch_interval_s:.0f}s. Ctrl-C to stop.")
     if not (dry_run or discover_only):
         # Streamed acquisitions reach the registry (and the dashboard) while
         # they're acquired, lease or not; see backfill.live_index.
         from backfill.live_index import LIVE_TICK_S, start_live_index_thread
 
         start_live_index_thread(registry_path, roots, decon_psf=resolve_decon_psf(), mip_fps=mip_fps)
-        print(f"[backfill] Live index: following streamed sessions every {LIVE_TICK_S:.0f}s.")
+        log(f"Live index: following streamed sessions every {LIVE_TICK_S:.0f}s.")
     paused = False
     while True:
         # Streaming wins: while a live acquisition holds the lease, start no
@@ -840,12 +842,12 @@ def watch_backfill(
         # servers won't take backfill tickets anyway). See opym.lanes.
         if lanes.live_lease_active():
             if not paused:
-                print("[backfill] Live acquisition in progress: pausing until its lease is released.")
+                log("Live acquisition in progress: pausing until its lease is released.")
                 paused = True
             time.sleep(_LEASE_POLL_S)
             continue
         if paused:
-            print("[backfill] Live lease released: resuming.")
+            log("Live lease released: resuming.")
             paused = False
         start = time.monotonic()
         try:
@@ -860,7 +862,7 @@ def watch_backfill(
                 wait_for_pending=False,
             )
         except Exception as e:  # noqa: BLE001 - one bad pass must not kill the service
-            print(f"[backfill] watch pass failed: {e!r}")
+            log(f"watch pass failed: {e!r}")
         elapsed = time.monotonic() - start
-        print(f"[backfill] Pass took {elapsed:.1f}s. Sleeping {watch_interval_s:.0f}s until next scan.")
+        log(f"Pass took {elapsed:.1f}s. Sleeping {watch_interval_s:.0f}s until next scan.")
         time.sleep(watch_interval_s)

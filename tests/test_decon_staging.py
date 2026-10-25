@@ -13,6 +13,8 @@ GPU, no real data.
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -373,7 +375,8 @@ class _FakeRegistry:
 
     def finish_stage(self, key, stage, *, status, output_path=None, ticket_path=None, error=None):
         self._row(key)[f"stage:{stage}"] = {
-            "status": status, "ticket_path": ticket_path, "output_path": output_path
+            "status": status, "ticket_path": ticket_path, "output_path": output_path,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
         }
 
     def reset_stage(self, key, stage):
@@ -901,6 +904,45 @@ def test_mip_encode_ignores_a_stale_live_store_when_batch_deskew_made_the_result
     assert registry._row("k")["triage"]["actual_timepoints"] == 3
 
 
+def _deskewed_with_current_settings(registry, pipeline, psf, finished_at):
+    row = registry._row("k")
+    row["decon_psf"] = str(psf.resolve())
+    row["decon_params"] = pipeline.decon_params_fingerprint()
+    row["stage:deskew"] = {"status": "done", "ticket_path": "old.json", "finished_at": finished_at}
+    row["stage:mip_encode"] = {"status": "done"}
+
+
+def _mark_backfilled(store, finished_at):
+    (Path(store) / ".opym_complete.json").write_text(
+        json.dumps({"format": 1, "state": "complete", "finished_at": finished_at})
+    )
+
+
+def test_a_store_completed_by_the_backfill_after_deskew_is_reprocessed(two_channel_store, monkeypatch):
+    """2026-10-24: the backfill added the live stream's missing timepoint to 5
+    runs in place; their deskew was 'done' from the stream's copy, so nothing
+    reprocessed them and the dashboard kept the stream's count."""
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    _deskewed_with_current_settings(registry, pipeline, tmp_path / "psf.tif", "2026-10-23T20:11:56+00:00")
+    _mark_backfilled(ds.channel_zarr_paths[0], time.time())
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+    assert len(submitted) == 1
+    assert registry.get_stage("k", "mip_encode")["status"] == "pending"
+
+
+def test_a_store_backfilled_before_its_deskew_is_left_alone(two_channel_store, monkeypatch):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    _deskewed_with_current_settings(registry, pipeline, tmp_path / "psf.tif", datetime.now(timezone.utc).isoformat())
+    _mark_backfilled(ds.channel_zarr_paths[0], time.time() - 3600)
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    assert registry.get_stage("k", "mip_encode")["status"] == "done"
+
+
 # ---- a store that is still being transferred must not be staged -------------------------
 # 2026-10-14: every root-level Cell_0xx dataset was staged while Globus was still copying
 # it. Chunks that had not landed read back as fill_value 0, so the staged frames, the
@@ -1006,3 +1048,52 @@ def test_unreadable_marker_does_not_count(two_channel_store, monkeypatch):
     monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
     (stores[0] / ".opym_complete.json").write_text("{not json")
     assert not _zarr_store_is_ready(stores[0])
+
+
+# ---- a store an SSH backfill left part-way: skipped before anything is touched -------------
+# 2026-10-25: 5 stores the backfill had begun (lock + metadata, no .zattrs yet) got an
+# empty decon_stage/ each and an error line every 120 s pass.
+def _half_sent(store, lock_age_s):
+    (Path(store) / ".zattrs").unlink()
+    lock = Path(store) / ".opym_backfill.lock"
+    lock.write_text("EEP230-OPM")
+    t = time.time() - lock_age_s
+    os.utime(lock, (t, t))
+
+
+def test_a_store_the_backfill_left_part_way_is_skipped_and_said_once(two_channel_store, monkeypatch, capsys):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _, _, tmp_path = two_channel_store
+    registry._row("k")["stage:deskew"] = {"status": "failed", "ticket_path": None}
+    _half_sent(ds.channel_zarr_paths[0], lock_age_s=3600)
+    old_output = tmp_path / "decon_stage" / "Decon" / "DSR_decon" / "cell_001_C0_T000.tif"
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+
+    assert submitted == []
+    assert old_output.exists(), "nothing is cleared for a store that is not ready"
+    out = capsys.readouterr().out
+    assert out.count("left part-way by an SSH backfill") == 1, out
+    assert "z step" not in out
+
+
+def test_a_store_the_backfill_is_writing_is_skipped_silently(two_channel_store, monkeypatch, capsys):
+    pipeline, ds, registry, submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    registry._row("k")["stage:deskew"] = {"status": "failed", "ticket_path": None}
+    _half_sent(ds.channel_zarr_paths[0], lock_age_s=5)
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is None
+    assert submitted == []
+    assert capsys.readouterr().out == ""
+
+
+def test_log_once_repeats_only_a_changed_notice(capsys):
+    from backfill.log import forget, log_once
+
+    assert log_once("k", "a") and not log_once("k", "a")
+    assert log_once("k", "b")
+    forget("k")
+    assert log_once("k", "b")
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3 and all(" [backfill] " in ln for ln in lines)
