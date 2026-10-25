@@ -857,6 +857,7 @@ def test_mip_encode_builds_movies_from_the_processed_store(two_channel_store, mo
 
     pipeline, ds, registry, _submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
     store = _live_processed_store(ds, n_t=3, n_c=2, done_t=range(3))
+    registry.finish_stage("k", "deskew", status="done", output_path=str(store))
     mip = zarr.open(str(store / "1" / "0"), mode="r+")
     mip[:] = np.arange(3 * 2 * 8 * 8, dtype=np.uint16).reshape(mip.shape)
     exported = []
@@ -870,6 +871,34 @@ def test_mip_encode_builds_movies_from_the_processed_store(two_channel_store, mo
     assert registry.get_stage("k", "mip_encode")["status"] == "done"
     assert registry._row("k")["triage"]["actual_timepoints"] == 3
     assert exported == []
+
+
+def test_mip_encode_ignores_a_stale_live_store_when_batch_deskew_made_the_result(
+    two_channel_store, monkeypatch
+):
+    """2026-10-24: the stream got 0 of 100 timepoints, so its viewer store was
+    empty; the SSH backfill brought the run in whole and batch deskew wrote
+    DSR TIFFs. mip_encode read the empty store ("No complete timepoints") and
+    the card stayed blank. The recorded deskew output decides which to use."""
+    from backfill import cli
+
+    pipeline, ds, registry, _submitted, _ = _resubmission_scenario(two_channel_store, monkeypatch)
+    _live_processed_store(ds, n_t=3, n_c=2, done_t=[])  # the stream's empty store
+    dsr = cli._dsr_dir_for(ds)
+    registry.finish_stage("k", "deskew", status="done", output_path=str(dsr))
+    built, exported = [], []
+    monkeypatch.setattr(cli, "build_mip_movies_for_dataset", lambda d, *a, **k: built.append(d))
+    monkeypatch.setattr(cli, "find_mip_files", lambda d: {"C0": [1, 2, 3], "C1": [1, 2, 3]})
+    monkeypatch.setattr(cli, "_reap_decon_intermediates", lambda ds: None)
+    monkeypatch.setattr(cli, "_export_for_viewers", lambda *a: exported.append(a))
+
+    cli._run_mip_encode(ds, registry, mip_fps=4)
+
+    row = registry.get_stage("k", "mip_encode")
+    assert row["status"] == "done", row
+    assert built == [dsr]
+    assert exported and exported[0][1] == dsr, "the viewer export rebuilds the store from the DSR"
+    assert registry._row("k")["triage"]["actual_timepoints"] == 3
 
 
 # ---- a store that is still being transferred must not be staged -------------------------

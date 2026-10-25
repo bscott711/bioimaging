@@ -328,6 +328,12 @@ def _run_mip_encode(
         _run_mip_encode_locked(ds, registry, mip_fps, declared_timepoints)
 
 
+def _deskew_result_is(registry: StatusRegistry, ds: LeafDataset, path: Path) -> bool:
+    """Whether the dataset's recorded deskew output is `path`."""
+    row = registry.get_stage(ds.dataset_key, "deskew")
+    return bool(row) and row.get("output_path") == str(path)
+
+
 def _run_mip_encode_locked(
     ds: LeafDataset, registry: StatusRegistry, mip_fps: float, declared_timepoints: int | None
 ) -> None:
@@ -339,6 +345,12 @@ def _run_mip_encode_locked(
         # lives regardless of which one ran first.
         movies_dir = resolve_output_base(ds.leaf_dir) / "mip_movies"
         store = processed_store_for(ds)
+        if store is not None and not _deskew_result_is(registry, ds, store):
+            # The live lane left this store, but batch deskew made the result
+            # (e.g. the stream got 0 of 100 timepoints, then the SSH backfill
+            # brought the run in whole, 2026-10-24): the store is stale, and
+            # the viewer export below replaces it.
+            store = None
         if store is not None:
             # The one-format live lane's processed OME-Zarr: MIPs from its
             # MIP series, and the store itself is the viewer export.
