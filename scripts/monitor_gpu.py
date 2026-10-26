@@ -74,7 +74,7 @@ def main(duration_seconds=600):
     ax2.legend(loc='upper right')
     
     plt.tight_layout()
-    output_file = "/home/SDSMT.LOCAL/bscott/projects/bioimaging/data/gpu_metrics_over_time.png"
+    output_file = "/home/SDSMT.LOCAL/bscott/projects/science/bioimaging/data/gpu_metrics_over_time.png"
     plt.savefig(output_file)
     print(f"Plot saved to: {output_file}")
 

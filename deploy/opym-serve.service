@@ -4,14 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/bioimaging
+WorkingDirectory=%h/projects/science/bioimaging
 # Transparent huge pages: numpy madvises every array over 4 MB for huge pages,
 # and with this host's THP defrag=madvise each first touch of one can stall in
 # direct compaction (measured 2026-09-26: 30 GB of 127 MB arrays took 101 s,
 # single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
 # does the same in-process (opym.live_view.no_hugepage_stalls).
 Environment=NUMPY_MADVISE_HUGEPAGE=0
-ExecStart=%h/projects/bioimaging/.venv/bin/opym-serve
+ExecStart=%h/projects/science/bioimaging/.venv/bin/opym-serve
 # The two PetaKit/Matlab servers run one per GPU (the default: 1->GPU 0, 2->GPU 1);
 # both GPUs are needed for batch work, so do not pin them to one. OPYM_SERVE_SERVERS
 # ("id:gpu,id:gpu") would override.
@@ -35,8 +35,8 @@ RestartSec=10
 # journalctl --user is not readable on this host, even for a unit's own
 # account (see opym-receive.service). Log to a plain file instead; the
 # MATLAB servers inherit this stdout, so their per-ticket lines land here too.
-StandardOutput=append:%h/projects/bioimaging/logs/opym-serve.log
-StandardError=append:%h/projects/bioimaging/logs/opym-serve.log
+StandardOutput=append:%h/projects/science/bioimaging/logs/opym-serve.log
+StandardError=append:%h/projects/science/bioimaging/logs/opym-serve.log
 
 [Install]
 WantedBy=default.target

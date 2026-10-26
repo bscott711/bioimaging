@@ -129,7 +129,7 @@ def main():
             md.append("*No specific line-level hotspots reported or time spent entirely in built-ins.*")
         md.append("\n---\n")
         
-    output_path = "/home/SDSMT.LOCAL/bscott/projects/bioimaging/scripts/profiling_deep_dive.md"
+    output_path = "/home/SDSMT.LOCAL/bscott/projects/science/bioimaging/scripts/profiling_deep_dive.md"
     with open(output_path, 'w') as f:
         f.write("\n".join(md))
         

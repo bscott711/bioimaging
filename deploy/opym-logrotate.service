@@ -4,4 +4,4 @@ Description=Rotate the opym/naparym service logs (user-level logrotate)
 [Service]
 Type=oneshot
 # logrotate doesn't expand ~ or %h, so render the config with this home first.
-ExecStart=/bin/sh -c 'sed "s|@HOME@|%h|g" %h/projects/bioimaging/deploy/opym-logrotate.conf > %t/opym-logrotate.conf && exec /usr/sbin/logrotate --state %S/opym-logrotate.state %t/opym-logrotate.conf'
+ExecStart=/bin/sh -c 'sed "s|@HOME@|%h|g" %h/projects/science/bioimaging/deploy/opym-logrotate.conf > %t/opym-logrotate.conf && exec /usr/sbin/logrotate --state %S/opym-logrotate.state %t/opym-logrotate.conf'

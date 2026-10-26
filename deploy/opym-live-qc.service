@@ -25,8 +25,8 @@ ExecStart=%h/projects/CORE/.venv/bin/celldet-live-qc --jobs /dev/shm/petakit_job
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host; see opym-receive.service.
-StandardOutput=append:%h/projects/bioimaging/logs/opym-live-qc.log
-StandardError=append:%h/projects/bioimaging/logs/opym-live-qc.log
+StandardOutput=append:%h/projects/science/bioimaging/logs/opym-live-qc.log
+StandardError=append:%h/projects/science/bioimaging/logs/opym-live-qc.log
 
 [Install]
 WantedBy=default.target
