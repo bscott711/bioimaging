@@ -2331,7 +2331,8 @@ requires-dist = [
     { name = "scikit-learn" },
     { name = "tifffile" },
     { name = "tqdm" },
-    { name = "zarr", specifier = "<3" },
+    { name = "zarr", marker = "python_full_version < '3.11'", specifier = "<3" },
+    { name = "zarr", marker = "python_full_version >= '3.11'", specifier = ">=2.18.7,<3" },
 ]
 provides-extras = ["dev", "viewer"]
 
