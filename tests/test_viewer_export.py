@@ -307,3 +307,55 @@ def test_export_rebuilds_an_aborted_acquisitions_oversized_store(tmp_path):
     import zarr
 
     assert zarr.open_group(str(store), mode="r")["0"].shape[0] == 2
+
+
+# -- real acquisition times -------------------------------------------------------
+
+
+def _dataset_with_raw_times(tmp_path, with_times=True):
+    """<session>/Cell_001/{dsr,viewer} beside <session>/Cell_001_GFP_488.ome.zarr."""
+    import zarr
+
+    sess = tmp_path / "sess"
+    dsr = sess / "Cell_001" / "dsr"
+    dsr.mkdir(parents=True)
+    _make_frames(dsr, channels=1, times=3)
+    raw = zarr.open_group(str(sess / "Cell_001_GFP_488.ome.zarr"), mode="w")
+    if with_times:
+        t = raw.create_dataset("t", shape=(3,), dtype="f8", fill_value=0.0)
+        t[:] = [900.0, 8400.0, 15900.0]
+        t.attrs["units"] = "ms"
+    return dsr, sess / "Cell_001" / "viewer"
+
+
+def test_export_records_the_raw_stores_real_times(tmp_path):
+    timeline = pytest.importorskip("opym.timeline")
+    dsr, viewer = _dataset_with_raw_times(tmp_path)
+    summary = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
+    zarr_out = viewer / "Cell_001_dsr.ome.zarr"
+    assert summary["times"] == "3 real times, interval 7.5 s"
+    rec = timeline.read_times(zarr_out)
+    assert rec["times_s"] == [0.0, 7.5, 15.0] and rec["interval_s"] == 7.5
+    scale = json.loads((zarr_out / ".zattrs").read_text())["multiscales"][0]
+    assert scale["datasets"][0]["coordinateTransformations"][0]["scale"][0] == 7.5
+    # exporting again reuses the store and leaves the same times
+    again = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
+    assert again.get("ome_zarr_reused") and again["times"] == summary["times"]
+
+
+def test_export_says_so_when_the_raw_stores_have_no_times(tmp_path):
+    pytest.importorskip("opym.timeline")
+    dsr, viewer = _dataset_with_raw_times(tmp_path, with_times=False)
+    summary = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
+    assert summary["times"] == "no real times in the raw stores"
+    assert (viewer / "Cell_001_dsr.ome.zarr").is_dir()  # the export itself is unaffected
+
+
+def test_export_works_with_an_opym_that_predates_the_timeline(tmp_path, monkeypatch):
+    from backfill import viewer_export
+
+    monkeypatch.setattr(viewer_export, "timeline", None)
+    dsr, viewer = _dataset_with_raw_times(tmp_path)
+    summary = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
+    assert summary["times"].startswith("not recorded")
+    assert (viewer / "Cell_001_dsr.ome.zarr").is_dir()
