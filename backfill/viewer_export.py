@@ -26,6 +26,7 @@ DSR resamples to an isotropic grid, so all three share one voxel size.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -38,6 +39,13 @@ import tifffile
 # timepoint by timepoint during acquisition; see export_for_viewers.
 from opym import ome_zarr_writer  # noqa: E402
 from opym.ome_zarr_writer import DSR_VOXEL_UM, PYRAMID_LEVELS  # noqa: E402,F401
+
+try:  # real per-volume acquisition times; an older opym lacks it (see _record_times)
+    from opym import timeline
+except ImportError:  # pragma: no cover - depends on which opym is installed
+    timeline = None
+
+logger = logging.getLogger(__name__)
 
 _FRAME_RE = re.compile(r"^(?P<prefix>.+)_C(?P<c>\d+)_T(?P<t>\d+)\.tif$")
 
@@ -232,6 +240,28 @@ def write_chimerax_script(
     return out_path
 
 
+def _record_times(zarr_path: Path, raw_stores=None) -> str:
+    """Copy the raw stores' real per-volume acquisition times into a viewer store.
+
+    The rig records when every volume was acquired; without this the viewer store
+    keeps a placeholder 1.0 s time axis. Returns a one-line note for the export
+    summary. Never raises: the times are metadata, and the export must not fail
+    over them.
+    """
+    if timeline is None:
+        return "not recorded: this opym predates opym.timeline"
+    try:
+        raws = list(raw_stores) if raw_stores is not None else timeline.raw_stores_for(zarr_path)
+        if not timeline.sync_processed(zarr_path, raws):
+            return "no real times in the raw stores" if raws else "no raw stores found"
+        rec = timeline.read_times(zarr_path)
+        known = sum(v is not None for v in rec["times_s"])
+        return f"{known} real times, interval {rec.get('interval_s')} s"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not record acquisition times in %s: %s", zarr_path, e)
+        return f"failed: {e}"
+
+
 def export_for_viewers(
     dsr_dir: Path,
     out_dir: Path,
@@ -241,6 +271,7 @@ def export_for_viewers(
     voxel_um: float = DSR_VOXEL_UM,
     single_names: list[str] | None = None,
     output_format: str = "both",
+    raw_stores: list[Path] | None = None,
 ) -> dict:
     """Keep the DSR result in `output_format` (see OUTPUT_FORMATS).
 
@@ -280,6 +311,7 @@ def export_for_viewers(
                                        voxel_um=voxel_um, channel_labels=channel_labels,
                                        single_names=single_names)
             summary["ome_zarr"] = str(zarr_path)
+        summary["times"] = _record_times(zarr_out, raw_stores)
     if output_format in ("tiff", "both"):
         cxc_path = write_chimerax_script(dsr_dir, out_dir / f"{name}_dsr.cxc",
                                          voxel_um=voxel_um, single_names=single_names)

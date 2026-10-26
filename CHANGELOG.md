@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The viewer export copies the raw stores' real per-volume acquisition times into the OME-Zarr it builds or reuses
+  (`viewer_export._record_times`, via `opym.timeline`): `.zattrs["opym_time"]` and the real median interval on the time axis, in
+  place of the 1.0 s placeholder. The export summary (`viewer_export.json`) says what happened under `times`. With an opym that
+  predates `opym.timeline` it records "not recorded" and the export is unchanged.
 - `psf_tools.decon_v2_cohort`: runs the decon-v2 `prod` controls and the combined arm (N2V + the corrected `*_bgv2` haze floor + OMW with the large synthetic PSF) on a
   table of cells (`seglab dv2-cells`), membrane channel only, with a gate against the STORED volume. `prod` and `prod_cubic` decide how the combined arm
   is resampled (datasets processed before 2026-09-24 match cubic exactly). `decon_v2_trial` takes a per-cell `CellSpec` (`--cohort FILE`), and
