@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/bioimaging
+WorkingDirectory=%h/projects/science/bioimaging
 Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
 # Decon is opt-in, and carried here rather than only in the installed copy so a
 # reinstall from this repo cannot silently revert production to deskew-only.
@@ -37,8 +37,8 @@ ExecStart=%h/.local/bin/uv run opym-backfill --watch 120 --decon-psf /mmfs2/scra
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host (see opym-receive.service).
-StandardOutput=append:%h/projects/bioimaging/logs/opym-backfill.log
-StandardError=append:%h/projects/bioimaging/logs/opym-backfill.log
+StandardOutput=append:%h/projects/science/bioimaging/logs/opym-backfill.log
+StandardError=append:%h/projects/science/bioimaging/logs/opym-backfill.log
 
 [Install]
 WantedBy=default.target

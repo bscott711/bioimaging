@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/bioimaging
+WorkingDirectory=%h/projects/science/bioimaging
 # Where backfilled stores may land: the directory a Globus transfer lands sessions in. The receiver
 # refuses any other destination, so a confused or hostile sender cannot write elsewhere.
 Environment=OPYM_BACKFILL_RAW_ROOTS=/mmfs1/scratch/jacks.local/microscopy:/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload
@@ -29,8 +29,8 @@ ExecStart=%h/.local/bin/uv run opym-receive-backfill
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host (see opym-receive.service).
-StandardOutput=append:%h/projects/bioimaging/logs/opym-receive-backfill.log
-StandardError=append:%h/projects/bioimaging/logs/opym-receive-backfill.log
+StandardOutput=append:%h/projects/science/bioimaging/logs/opym-receive-backfill.log
+StandardError=append:%h/projects/science/bioimaging/logs/opym-receive-backfill.log
 
 [Install]
 WantedBy=default.target

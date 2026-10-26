@@ -7,11 +7,11 @@ from pathlib import Path
 import sys
 
 # Add bioimaging so we can import auto_detect_rois and get_z_step
-sys.path.append("/home/SDSMT.LOCAL/bscott/projects/bioimaging")
+sys.path.append("/home/SDSMT.LOCAL/bscott/projects/science/bioimaging")
 from run_pipeline_cli import auto_detect_rois, get_z_step
 
 # Add opym_local to path to import petakit if needed
-sys.path.append("/home/SDSMT.LOCAL/bscott/projects/opym_local/src")
+sys.path.append("/home/SDSMT.LOCAL/bscott/projects/science/opym_local/src")
 from opym.petakit import submit_pipeline_job, wait_for_job
 from opym.utils import orient_zyx_for_dsr
 

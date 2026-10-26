@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/bioimaging
+WorkingDirectory=%h/projects/science/bioimaging
 # MUST match opym-backfill.service's own `--decon-psf` flag (which sets
 # this same env var in-process -- see run_backfill_cli.py -- but only for
 # ITS OWN process; opym-receive is a separate service and does not inherit
@@ -55,7 +55,7 @@ Environment=OPYM_LIVE_FORMAT=zarr
 Environment=NUMPY_MADVISE_HUGEPAGE=0
 # The rig's own stream log (pymmcore-gui CLIENT_LOG, opym#55): one file per day,
 # so a post-mortem never needs the acquisition PC (unreachable from here).
-Environment=OPYM_STREAM_CLIENT_LOG_DIR=%h/projects/bioimaging/logs/rig
+Environment=OPYM_STREAM_CLIENT_LOG_DIR=%h/projects/science/bioimaging/logs/rig
 ExecStart=%h/.local/bin/uv run opym-receive
 Restart=on-failure
 RestartSec=10
@@ -65,8 +65,8 @@ RestartSec=10
 # every service here, not just this one. Redirect to a plain file instead
 # so SESSION_START/SESSION_END/drain-queued/drained lines (the only way to
 # confirm a streamed acquisition actually landed) are actually readable.
-StandardOutput=append:%h/projects/bioimaging/logs/opym-receive.log
-StandardError=append:%h/projects/bioimaging/logs/opym-receive.log
+StandardOutput=append:%h/projects/science/bioimaging/logs/opym-receive.log
+StandardError=append:%h/projects/science/bioimaging/logs/opym-receive.log
 
 [Install]
 WantedBy=default.target
