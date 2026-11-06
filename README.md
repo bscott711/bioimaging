@@ -44,7 +44,6 @@ Installed as console scripts via `uv sync` (see `pyproject.toml`
 
 | Command           | What it does                                                                        |
 |-------------------|--------------------------------------------------------------------------------------|
-| `naparym`         | napari GUI front end (`run_napari_opym.py`). **Known broken** (unpacks a 4-tuple plan as 3, waits on a queue dir that no longer exists); do not rely on it |
 | `opym <dir>`      | Intended: CLI pipeline (`run_pipeline_cli.py`). **Shadowed**: opym registers a script named `opym` too and `.venv/bin/opym` is opym's own CLI. Run `python run_pipeline_cli.py <dir>` |
 | `opym-serve`      | GPU supervisor: keeps one PetaKit5D MATLAB server per GPU running over the job queue |
 | `opym-receive`    | Streaming ingress for frames pushed live from acquisition; hosts the live lane        |
@@ -53,14 +52,13 @@ Installed as console scripts via `uv sync` (see `pyproject.toml`
 | `opym-backfill-send` | Rig-side sender for that backfill (the rig runs pymmcore-gui's own copy) |
 | `opym-backfill`   | Process every acquisition under the data roots (`backfill/`); `--watch SECONDS` keeps running |
 | `opym-storage-triage` | Read-only storage suggestions (`scan`, `hash`, `report`, `verify`); see `docs/STORAGE_TRIAGE_RULES.md`. The PI deletes |
-| `naparym-live`    | Follow a live acquisition (or open a finished dataset's OME-Zarr) in napari           |
 | `opym-live-trace` | Per-hop latency report for a live session, last plane acquired to napari screen       |
 
 `opym-serve`, `opym-receive`, `opym-receive-backfill`, `opym-backfill-send`,
-`naparym-live`, `opym-live-trace` and `opym-stream-watch` are implemented in
+`opym-live-trace` and `opym-stream-watch` are implemented in
 the `opym` package (`opym.local_gpu_worker`, `opym.stream.receiver`,
 `opym.stream.backfill_receiver`, `opym.stream.backfill_client`,
-`opym.live_view`, `opym.stream.trace_report`, `opym.stream.client`); this repo
+`opym.stream.trace_report`, `opym.stream.client`); this repo
 only registers the console scripts. (`opym-add-times` is in the venv because
 opym is installed there; this repo does not register it.)
 
@@ -281,7 +279,7 @@ before merging, not just by reading numbers.
 
 ## Repo layout
 
-- `run_pipeline_cli.py`, `run_napari_opym.py`, `run_backfill_cli.py` — entry points
+- `run_pipeline_cli.py`, `run_backfill_cli.py` — entry points
 - `psf_tools/` — PSF measurement, channel/fluorophore detection, decon trial tooling
 - `backfill/` — the backfill pipeline: triage, crop, deskew tickets, MIP movies, viewer export
 - `backfill/storage_triage/` — read-only storage suggestions

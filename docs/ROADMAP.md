@@ -16,7 +16,7 @@ only when the user says so. Other-repo ids (BF-, ING-, PROC-) are from the [opym
 | 5 | Provenance | M (cross-repo) | 3; user decision | trustworthy `done` |
 | 6 | Products | M | 1 | none |
 | 7 | Storage triage | M | 1 | none |
-| 8 | psf_tools and naparym | S to M | 1 | none |
+| 8 | psf_tools | S to M | 1 | none |
 | 9 | Lint, type debt, dead code | S | none | none |
 
 Item 1 is done: bare `pytest` is safe from a worktree (never in the production checkout, never `uv run` there). The command is in [CLAUDE.md](../CLAUDE.md).
@@ -95,15 +95,15 @@ Item 1 is done: bare `pytest` is safe from a worktree (never in the production c
 - Depends on: 1. Do ST-01 first; it is the only P1.
 - Note: the tool never deletes; the PI does. Fix the suggestions before the next delete round.
 
-## 8. psf_tools and naparym
-- What: fix or retire `naparym` (PSF-01, PSF-02); anchor the fluorophore regexes and key the extraction-plan cache by
+## 8. psf_tools
+- What: `naparym` (PSF-01, PSF-02) was retired 2026-11-06; anchor the fluorophore regexes and key the extraction-plan cache by
   mtime (PSF-03, PSF-04); deprecate `phase_retrieve_psf` (PSF-05); mark one-off sweeps as non-library and route them
   through lane admission (PSF-08, PSF-13); crop origin with staged volumes (PSF-06); PSF z step from the bead stack
   (PSF-07); smaller items PSF-09 to PSF-15.
-- Closes: PSF-01 to PSF-15.
+- Closes: PSF-01 (retired 2026-11-06) to PSF-15.
 - Depends on: 1. PSF-03 and PSF-04 touch production extraction, so compare the plan before and after over the existing
   DataUpload folder names.
-- Decision for the user: fix or retire `naparym` (last edited 2026-08-04; no unit runs it).
+- Decision taken: `naparym` retired 2026-11-06 (`run_napari_opym.py`, its probes and console script removed).
 
 ## 9. Lint, type debt, dead code
 - What: ruff 224 errors (121 fixable) and 67 files unformatted, mypy 12 errors in 6 files (T07 counts, all at

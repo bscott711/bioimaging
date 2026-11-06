@@ -19,7 +19,7 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - `backfill/`: `cli.py` discovery, pool, watch loop, ticket collection; `pipeline.py` staging, tickets, admission,
   outputs; `viewer_export.py`, `mip_movie.py`, `live_index.py`, `log.py`; `storage_triage/` (read-only suggestions,
   rules in `docs/STORAGE_TRIAGE_RULES.md`).
-- `run_backfill_cli.py`, `run_pipeline_cli.py`, `run_napari_opym.py`: drivers; the logic lives in `backfill/` and opym.
+- `run_backfill_cli.py`, `run_pipeline_cli.py`: drivers; the logic lives in `backfill/` and opym.
 - `psf_tools/`: PSF and decon v2 trial tooling; only `extraction_plan` is on the production path.
 - `deploy/`: unit templates and `opym-logrotate.conf`. `tests/` (real tests only), `scripts/` (with `scripts/probes/`, manual probes), `scratch/`,
   `matlab_legacy/`, `data/` are not production.
@@ -27,9 +27,9 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 ## Entry points (`pyproject.toml`)
 
 - Ours: `opym-backfill`, `opym-storage-triage`. From opym: `opym-serve`, `opym-receive`, `opym-receive-backfill`,
-  `opym-backfill-send`, `opym-stream-watch`, `naparym-live`, `opym-live-trace`.
+  `opym-backfill-send`, `opym-stream-watch`, `opym-live-trace`.
 - `opym` is SHADOWED: opym registers it too and `.venv/bin/opym` is opym's own CLI. Run `python run_pipeline_cli.py <dir>`.
-- `naparym` is BROKEN (PSF-01, PSF-02): it cannot finish a run. Do not rely on it.
+- `naparym`, the old napari GUI (`run_napari_opym.py`), was retired 2026-11-06. `naparym-live` is a separate repo, deployed from `~/opt/naparym-live`; this repo no longer registers a `naparym-live` script.
 
 ## How production runs
 
