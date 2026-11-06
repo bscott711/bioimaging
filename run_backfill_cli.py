@@ -4,8 +4,7 @@
 Deconvolution is opt-in via --decon-psf; without it this is the
 deskew-only pipeline it has always been.
 
-Thin orchestrator, matching the run_pipeline_cli.py/run_napari_opym.py
-convention: business logic lives in backfill/, this just parses args.
+Thin orchestrator, matching the run_pipeline_cli.py convention: business logic lives in backfill/, this just parses args.
 """
 
 import argparse

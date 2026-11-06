@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Docs
 - 2026-11 review: `docs/review/2026-11-review.md`, `docs/ROADMAP.md`; `CLAUDE.md` rewritten; README test command and paths corrected.
 
+### Removed
+- `naparym` (the old napari GUI, `run_napari_opym.py`; known broken, PSF-01/PSF-02), its `naparym` console script and hatch include,
+  the `scripts/run_xvfb.sh` launcher, and the 11 probes that only drove it (`scripts/probes/` dock, dock2, dock_pos, dock_pos2,
+  main, move, help, start, split, widget, pipeline_headless). The `naparym-live = "opym.live_view:main"` console script entry is
+  also dropped: it duplicated the deployed `~/opt/naparym-live`, which is a separate repo.
+
 ### Fixed
 - Test safety (review TI-01 to TI-09): bare `pytest` no longer runs scratch scripts at collection. The 15 zero-test files moved
   from `tests/` to `scripts/probes/` (plus `scripts/decon_probe.py`, `scratch/mp_probe.py`); `pyproject.toml` sets
