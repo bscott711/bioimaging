@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 2026-11 review: `docs/review/2026-11-review.md`, `docs/ROADMAP.md`; `CLAUDE.md` rewritten; README test command and paths corrected.
 
 ### Fixed
+- Test safety (review TI-01 to TI-09): bare `pytest` no longer runs scratch scripts at collection. The 15 zero-test files moved
+  from `tests/` to `scripts/probes/` (plus `scripts/decon_probe.py`, `scratch/mp_probe.py`); `pyproject.toml` sets
+  `testpaths`, the `gpu` marker and `norecursedirs`; `tests/conftest.py` redirects the registry and `PETAKIT_JOBS_DIR` to a tmp
+  dir before import, redirects `opym.petakit.QUEUE_DIR`, and raises on any access to `/dev/shm/petakit_jobs`;
+  `test_watch_backfill` uses a tmp registry and stubs the live-index thread; `tests/test_test_safety_guards.py` fails if a
+  guard is removed. `opym.petakit.QUEUE_DIR` itself still ignores `PETAKIT_JOBS_DIR` (opym follow-up).
 - Deskew-only (no PSF) zarr datasets now have the same handedness as decon and the live lane. They used to read the symlink
   mirror (`zarr_mirror/`) with `inputAxisOrder='zxy'`, a lateral (y) mirror of the rot90 convention the measured PSF, the TIFF
   cropper and the live lane use. Every zarr dataset now stages rot90 `(ny, nx, nz)` TIFFs in `decon_stage/` and submits with

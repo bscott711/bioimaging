@@ -9,7 +9,7 @@ only when the user says so. Other-repo ids (BF-, ING-, PROC-) are from the [opym
 
 | # | Item | Scope | Depends on | Unblocks |
 |---|---|---|---|---|
-| 1 | Test safety | S | none | safe tests for 3 to 8 |
+| 1 | Test safety (done 2026-11-06, except the opym `queue_dir` ask) | S | none | safe tests for 3 to 8 |
 | 2 | Units | S (deploy needs the user's go) | none | restarts that do not change the venv |
 | 3 | Never delete before admission; record errors | M | 1 | 4, 5 |
 | 4 | Discovery and readiness | M | 1; opym ING-F2 for PL-08 | 5 |
@@ -19,17 +19,22 @@ only when the user says so. Other-repo ids (BF-, ING-, PROC-) are from the [opym
 | 8 | psf_tools and naparym | S to M | 1 | none |
 | 9 | Lint, type debt, dead code | S | none | none |
 
-Until item 1 is done, the only safe test command is the one in [CLAUDE.md](../CLAUDE.md).
+Item 1 is done: bare `pytest` is safe from a worktree (never in the production checkout, never `uv run` there). The command is in [CLAUDE.md](../CLAUDE.md).
 
 ## 1. Test safety
-- What: move the 11 scratch files out of `tests/` (to `scripts/probes/`); add `testpaths = ["tests"]` and a registered
-  `gpu` marker to `pyproject.toml`; conftest guards for `backfill.cli.DEFAULT_REGISTRY_PATH` and
-  `opym.petakit.QUEUE_DIR` (autouse, fail on any open of `/dev/shm/petakit_jobs`); `test_watch_backfill` passes a tmp
-  registry and stubs `start_live_index_thread`. Ask opym to pass `queue_dir=lanes.backfill_queue_dir()` (opym BF
-  contract).
+- Status: DONE 2026-11-06 (PR A), except the last bullet.
+- What was done: the 15 zero-test scratch files moved out of `tests/` to `scripts/probes/` (README there), with
+  `scripts/test_decon.py` and `scratch/test_mp.py` renamed to `*_probe.py`; `pyproject.toml` has `testpaths = ["tests"]`, a
+  registered `gpu` marker and `norecursedirs`; `tests/conftest.py` sets `OPYM_BACKFILL_REGISTRY_PATH` and `PETAKIT_JOBS_DIR`
+  to a tmp dir before any project import (and refuses to run if `backfill.cli.DEFAULT_REGISTRY_PATH` is not under it),
+  redirects `opym.petakit.QUEUE_DIR` and its captured default arguments, and raises on any open/mkdir/replace under
+  `/dev/shm/petakit_jobs`; `test_watch_backfill` passes a tmp registry and stubs `start_live_index_thread`;
+  `tests/test_test_safety_guards.py` is the negative control.
+- Still open: ask opym to pass `queue_dir=lanes.backfill_queue_dir()` (opym BF contract), so production code stops
+  depending on the test guard for `QUEUE_DIR`.
 - Closes: TI-01 to TI-09, OR-09 (pytest part).
 - Unblocks: every later item (they add tests).
-- Decision: delete the scratch files or keep them under `scripts/probes/`.
+- Decision taken: the scratch files are kept under `scripts/probes/`, not deleted.
 
 ## 2. Units
 - What: run `.venv/bin/<script>` instead of `uv run` in `opym-backfill`, `opym-receive` and `opym-receive-backfill`

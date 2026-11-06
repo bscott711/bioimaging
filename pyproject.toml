@@ -47,6 +47,12 @@ torch = [{ index = "pytorch-cuda" }]
 torchvision = [{ index = "pytorch-cuda" }]
 opym = { path = "../opym_local", editable = true }
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs a GPU (deselect with -m 'not gpu')"]
+# Belt and braces: probes and scratch scripts must never be collected.
+norecursedirs = ["scripts", "scratch", "matlab_legacy", "data", ".venv"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
