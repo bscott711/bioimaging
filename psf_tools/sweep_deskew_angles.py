@@ -4,15 +4,10 @@ import zarr
 import time
 import numpy as np
 from pathlib import Path
-import sys
 
-# Add bioimaging so we can import auto_detect_rois and get_z_step
-sys.path.append("/home/SDSMT.LOCAL/bscott/projects/science/bioimaging")
-from run_pipeline_cli import auto_detect_rois, get_z_step
-
-# Add opym_local to path to import petakit if needed
-sys.path.append("/home/SDSMT.LOCAL/bscott/projects/science/opym_local/src")
+from opym.metadata import GUESSED_Z_STEP_UM, parse_z_step
 from opym.petakit import submit_pipeline_job, wait_for_job
+from opym.roi_detect import auto_detect_rois
 from opym.utils import orient_zyx_for_dsr
 
 target_path = Path("/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload/20260402_py_FLM_2XFyve_mSca_mem_NG/cell/cell_MMStack_Pos0.ome.tif")
@@ -33,8 +28,7 @@ def main():
     store = tifffile.imread(str(target_path), aszarr=True)
     z = zarr.open(store, mode='r')
     
-    z_step_um = get_z_step(target_path)
-    if z_step_um is None: z_step_um = 0.3
+    z_step_um = parse_z_step(target_path, default_z_step=GUESSED_Z_STEP_UM)
     
     top_roi, bot_roi = auto_detect_rois(z)
     roi = top_roi if top_roi else bot_roi

@@ -1,6 +1,6 @@
 """Re-blends already-encoded composite MIP previews (movie or single-frame
 poster) from their source per-channel MIP TIFFs, using the current
-`_CHANNEL_COLORS` palette in `backfill/mip_movie.py` -- without re-running
+`_channel_color` palette (opym's) in `backfill/mip_movie.py` -- without re-running
 crop/deskew/decon or re-encoding the untouched per-channel movies.
 
 Written for the cyan/magenta -> green/magenta palette change: every dataset
@@ -19,10 +19,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
-from opym.registry import StatusRegistry
+from opym.registry import StatusRegistry, registry_path
 
 from backfill.mip_movie import (
     build_poster_for_zarr_dataset,
@@ -32,15 +31,7 @@ from backfill.mip_movie import (
     write_composite,
 )
 
-# Mirrors backfill/cli.py's DEFAULT_REGISTRY_PATH (same env var) without
-# importing that module's full multiprocessing/MATLAB-ticket machinery just
-# for one path constant.
-DEFAULT_REGISTRY_PATH = Path(
-    os.environ.get(
-        "OPYM_BACKFILL_REGISTRY_PATH",
-        "/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3",
-    )
-)
+DEFAULT_REGISTRY_PATH = registry_path()
 
 
 def _reblend_movie_composite(dsr_dir: Path, composite_path: Path, fps: float) -> None:

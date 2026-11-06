@@ -23,21 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import tifffile
 import zarr
 
-# run_pipeline_cli (ROI/z-step helpers) lives at the bioimaging repo root;
-# opym is the editable dependency. Mirror sweep_deskew_angles.py's path setup so
-# this runs both as a module and as a bare script.
-_BIOIMAGING_ROOT = Path(__file__).resolve().parents[1]
-if str(_BIOIMAGING_ROOT) not in sys.path:
-    sys.path.append(str(_BIOIMAGING_ROOT))
-
-from run_pipeline_cli import auto_detect_rois, get_z_step  # noqa: E402
+from opym.metadata import GUESSED_Z_STEP_UM, parse_z_step  # noqa: E402
+from opym.roi_detect import auto_detect_rois  # noqa: E402
 from opym.petakit import submit_pipeline_job, wait_for_job  # noqa: E402
 from opym.utils import orient_zyx_for_dsr  # noqa: E402
 
@@ -83,7 +76,7 @@ def stage_first_timepoint(target: Path, channel: int, roi_side: str):
     if z.ndim != 5:
         raise ValueError(f"Expected 5D (T,Z,C,Y,X) data, got shape {z.shape}")
 
-    z_step_um = get_z_step(target) or 0.3
+    z_step_um = parse_z_step(target, default_z_step=GUESSED_Z_STEP_UM)
     top_roi, bot_roi = auto_detect_rois(z)
     roi = top_roi if roi_side == "top" else bot_roi
     if not roi:

@@ -28,6 +28,7 @@ from opym.decon_config import decon_params_fingerprint, ticket_decon_fingerprint
 from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset, discover_leaf_datasets
 from opym.petakit import resolve_deskew_working_dir
 from opym.registry import MAX_STAGE_FAILURES, StatusRegistry
+from opym.registry import registry_path as opym_registry_path
 from opym.ome_zarr_writer import mip_stacks
 from opym.utils import resolve_output_base, sanitize_filename
 
@@ -62,12 +63,8 @@ from backfill.pipeline import (
 # before likely-empty data.
 _SIGNAL_PRIORITY = {"ok": 0, "unknown": 1, "dud": 2}
 
-DEFAULT_REGISTRY_PATH = Path(
-    os.environ.get(
-        "OPYM_BACKFILL_REGISTRY_PATH",
-        "/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3",
-    )
-)
+# Evaluated at import (tests set the env var first); the env name and production default are opym's.
+DEFAULT_REGISTRY_PATH = opym_registry_path()
 
 _LEGACY_DECON_NAMES = ("Decon", "decon")
 
