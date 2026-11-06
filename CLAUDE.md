@@ -33,6 +33,9 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Contracts (display encoding and palette, completion marker and lock names, z-step env rule, registry path) are imported from opym, never
   copied here: `opym.display`, `opym.stream.bfill`, `opym.metadata.zarr_fallback_z_step`, `opym.registry`. Tests use `opym.testing.*` fixtures
   and a `StatusRegistry` subclass for the fake registry. This repo needs `opym[server]` (the base opym is numpy-only).
+  opym stays an editable path dependency (`../opym_local`, the production deploy of opym), so there is no SHA pin to bump: the contracts
+  in use are whatever opym checkout is deployed. After changing opym's extras, re-run `uv lock` with an opym worktree at `../opym_local`
+  (in a bioimaging worktree that path is `~/projects/.worktrees/bioimaging/opym_local`; remove it afterwards).
 - `naparym`, the old napari GUI (`run_napari_opym.py`), was retired 2026-11-06. `naparym-live` is a separate repo, deployed from `~/opt/naparym-live`; this repo no longer registers a `naparym-live` script.
 
 ## How production runs
