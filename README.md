@@ -64,10 +64,12 @@ the `opym` package (`opym.local_gpu_worker`, `opym.stream.receiver`,
 only registers the console scripts. (`opym-add-times` is in the venv because
 opym is installed there; this repo does not register it.)
 
-Tests: the safe command is in [`CLAUDE.md`](CLAUDE.md) ("Run and test"). Do
-not use `uv run pytest` or a bare `pytest`: `tests/` holds scratch files that run
-at import, and one of them rewrites benchmark data on `/mmfs2`. Run it from a
-repo or worktree root only.
+Tests: see [`CLAUDE.md`](CLAUDE.md) ("Run and test"). Bare `pytest` from a
+worktree is safe: it collects only `tests/`, and `tests/conftest.py` redirects the
+registry and the PetaKit jobs dir to a tmp dir, and its guard refuses
+`open`/`mkdir`/`replace` under `/dev/shm/petakit_jobs`. Do not run tests in the production checkout and do not
+use `uv run` there (it re-syncs the production `.venv`). The old scratch scripts
+that ran at import now live in `scripts/probes/` and are run by hand only.
 
 ```bash
 just dcv                # start a DCV remote-desktop session (see JustFile)
@@ -290,7 +292,7 @@ before merging, not just by reading numbers.
 - `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, `opym-receive-backfill`, `opym-live-qc` (live per-timepoint QC, runs from `~/projects/science/CORE`), and the `opym-logrotate` timer
 - `CHANGELOG.md` — release notes; `uv.lock` — pinned environment
 - `scratch/` — throwaway scripts, never promoted into the library
-- `tests/` — pytest suite plus scratch files that must not be run (see `CLAUDE.md` for the safe command)
+- `tests/` — pytest suite (see `CLAUDE.md` for the command); `scripts/probes/` holds the manual probes that used to sit here
 
 See `CLAUDE.md` for the services layout, production notes and the safe test command,
 and [`docs/review/2026-11-review.md`](docs/review/2026-11-review.md) /

@@ -13,12 +13,12 @@ import pytest
 from backfill import cli
 
 
-def test_finish_pending_does_not_wait_in_watch_mode(monkeypatch):
+def test_finish_pending_does_not_wait_in_watch_mode(monkeypatch, tmp_path):
     drained = []
     monkeypatch.setattr(cli, "_drain_resolved_tickets", lambda p, *a: drained.append(dict(p)))
     monkeypatch.setattr(cli.time, "sleep", lambda s: pytest.fail("watch pass must not sleep"))
 
-    pending = {"never-resolves": Path("/dev/shm/petakit_jobs/queue/x.json")}
+    pending = {"never-resolves": tmp_path / "x.json"}
     cli._finish_pending(pending, {}, None, 12.0, wait=False, poll_interval_s=30.0)
 
     assert len(drained) == 1
@@ -40,7 +40,15 @@ def test_finish_pending_waits_in_one_shot_mode(monkeypatch):
     assert calls == [1, 1, 1] and not pending
 
 
-def test_watch_backfill_passes_do_not_wait(monkeypatch):
+def _no_live_index(monkeypatch):
+    """watch_backfill starts the live-index thread on `registry_path`; no test needs it."""
+    from backfill import live_index
+
+    monkeypatch.setattr(live_index, "start_live_index_thread", lambda *a, **k: None)
+
+
+def test_watch_backfill_passes_do_not_wait(monkeypatch, tmp_path):
+    _no_live_index(monkeypatch)
     seen = {}
 
     def fake_run(roots, **kwargs):
@@ -49,7 +57,7 @@ def test_watch_backfill_passes_do_not_wait(monkeypatch):
 
     monkeypatch.setattr(cli, "run_backfill", fake_run)
     with pytest.raises(KeyboardInterrupt):
-        cli.watch_backfill([Path("/nowhere")])
+        cli.watch_backfill([Path("/nowhere")], registry_path=tmp_path / "reg.sqlite3")
     assert seen["wait_for_pending"] is False
 
 
@@ -84,8 +92,10 @@ def test_output_format_prefers_store_then_env_then_both(tmp_path, monkeypatch):
     assert cli._resolve_output_format(_Ds(None)) == "both"
 
 
-def test_watch_backfill_pauses_while_a_live_lease_is_held(monkeypatch):
+def test_watch_backfill_pauses_while_a_live_lease_is_held(monkeypatch, tmp_path):
     from opym import lanes
+
+    _no_live_index(monkeypatch)
 
     lanes.write_lease(["live-session"])
     events = []
@@ -101,5 +111,5 @@ def test_watch_backfill_pauses_while_a_live_lease_is_held(monkeypatch):
     monkeypatch.setattr(cli.time, "sleep", fake_sleep)
     monkeypatch.setattr(cli, "run_backfill", fake_run)
     with pytest.raises(KeyboardInterrupt):
-        cli.watch_backfill([Path("/nowhere")])
+        cli.watch_backfill([Path("/nowhere")], registry_path=tmp_path / "reg.sqlite3")
     assert events == [("sleep", cli._LEASE_POLL_S), ("pass",)]

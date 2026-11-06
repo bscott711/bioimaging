@@ -2,7 +2,7 @@
 channel index maps to which output channel, for which fluorophore.
 
 Previously duplicated (with a slightly different, unused 3-tuple variant)
-between run_pipeline_cli.py and tests/test_extraction_plan.py; this is now
+between run_pipeline_cli.py and scripts/probes/extraction_plan_smoke.py; this is now
 the single canonical implementation both import from.
 """
 

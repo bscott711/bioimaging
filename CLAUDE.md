@@ -21,7 +21,7 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
   rules in `docs/STORAGE_TRIAGE_RULES.md`).
 - `run_backfill_cli.py`, `run_pipeline_cli.py`, `run_napari_opym.py`: drivers; the logic lives in `backfill/` and opym.
 - `psf_tools/`: PSF and decon v2 trial tooling; only `extraction_plan` is on the production path.
-- `deploy/`: unit templates and `opym-logrotate.conf`. `tests/` (15 real files), `scripts/`, `scratch/`,
+- `deploy/`: unit templates and `opym-logrotate.conf`. `tests/` (real tests only), `scripts/` (with `scripts/probes/`, manual probes), `scratch/`,
   `matlab_legacy/`, `data/` are not production.
 
 ## Entry points (`pyproject.toml`)
@@ -46,31 +46,36 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Never edit, switch branch in, or run `uv run` / `uv sync` in `~/projects/science/bioimaging`; work in a worktree
   under `~/projects/.worktrees/bioimaging/<topic>`.
 
-## Run and test (use only this command)
+## Run and test
+
+Bare `pytest` is safe from a worktree: `pyproject.toml` limits collection to `tests/`, and
+`tests/conftest.py` points `OPYM_BACKFILL_REGISTRY_PATH` and `PETAKIT_JOBS_DIR` at a fresh tmp dir before any project
+import, redirects `opym.petakit.QUEUE_DIR` (and the default arguments that captured it) to a per-test tmp queue, and makes
+any open/mkdir/replace under `/dev/shm/petakit_jobs` raise. `tests/test_test_safety_guards.py` fails if a guard is removed.
+Still: never run tests in the production checkout `~/projects/science/bioimaging`, and never `uv run` there (it re-syncs
+the production `.venv`). Run from a worktree with the production venv's interpreter:
 
 ```
-# from this repo's root or a worktree root ONLY; never `uv run`, never a bare `pytest`/`pytest tests/`
+# from a worktree root; never `uv run`, never in ~/projects/science/bioimaging itself
 T=$(mktemp -d); export OPYM_BACKFILL_REGISTRY_PATH=$T/registry.sqlite3 PETAKIT_JOBS_DIR=$T/petakit_jobs \
   OPYM_BACKFILL_LOG_SEEN_DIR=$T/log_seen OPYM_OUTPUT_MIRROR_ROOT=$T/mirror OPYM_BACKFILL_DIR=$T/opym_backfill \
   QT_QPA_PLATFORM=offscreen CUDA_VISIBLE_DEVICES=
 unset OPYM_DECON_PSF OPYM_ZARR_DEFAULT_Z_STEP OPYM_LIVE_LANE OPYM_LIVE_FORMAT OPYM_LIVE_QC
-HOME=$T/home ~/projects/science/bioimaging/.venv/bin/python -m pytest -q -p no:cacheprovider \
-  tests/test_backfill_maintenance.py tests/test_bead_psf_quality.py tests/test_decon_haze_bg.py \
-  tests/test_decon_staging.py tests/test_decon_v2_cohort.py tests/test_decon_v2_trial.py \
-  tests/test_fluorophore_parsing.py tests/test_live_index.py tests/test_mip_movie.py \
-  tests/test_phase_retrieve_psf.py tests/test_storage_triage.py tests/test_synthetic_opm_psf.py \
-  tests/test_ticket_collection.py tests/test_viewer_export.py tests/test_watch_backfill.py
+HOME=$T/home ~/projects/science/bioimaging/.venv/bin/python -m pytest -q -p no:cacheprovider -m "not gpu"
 ```
 
-232 pass (2026-11-06). Set the env vars before Python starts: the registry path is read at import.
+237 pass (2026-11-06). The env vars cover paths the conftest does not redirect (log, mirror, backfill dir, PSF and lane
+settings). Never import a test module from another directory (conftest isolation is skipped).
 
 ## Gotchas
 
-- Scratch "tests" in `tests/` run at import: `test_conver_to_zarr.py` removes and rewrites `/mmfs2/.../benchmark_zarr_*.zarr`,
-  another writes `/tmp/mock_data`. That is why the command lists files. Never import a test module from another directory
-  (conftest isolation is skipped).
-- `backfill.cli.DEFAULT_REGISTRY_PATH` is evaluated at import; `opym.petakit.QUEUE_DIR` ignores `PETAKIT_JOBS_DIR`
-  (a test that forgets to patch the submit writes into the production queue).
+- The scratch "tests" that ran at import (one rewrote `/mmfs2/.../benchmark_zarr_*.zarr`, another wrote `/tmp/mock_data`)
+  moved to `scripts/probes/` (see its README), plus `scripts/decon_probe.py` and `scratch/mp_probe.py`. They are manual;
+  never point pytest at them.
+- `backfill.cli.DEFAULT_REGISTRY_PATH` is evaluated at import, so the conftest sets its env var before importing
+  `backfill.cli` and refuses to run if the path is not under its tmp dir. `opym.petakit.QUEUE_DIR` ignores
+  `PETAKIT_JOBS_DIR`; production code still writes there unless the caller passes `queue_dir=` (open: ask opym to pass
+  `lanes.backfill_queue_dir()`), and only the conftest redirect and guard protect tests.
 - Ordering risks in `pipeline.py`: old `Decon/` and DSR are deleted before a new ticket is admitted (PL-01); a superseded
   in-flight ticket is not cancelled (PL-02); errors are logged but not recorded (PL-10).
 - Storage triage only suggests. The PI deletes; do not delete datasets under `/mmfs1` or `/mmfs2`, and tests and scripts

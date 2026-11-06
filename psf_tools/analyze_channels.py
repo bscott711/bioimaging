@@ -23,7 +23,7 @@ FLUOROPHORES = {
     # wavelength number so it contributes to Detected_Channels for
     # reporting without affecting extraction_plan's has_488/has_561/etc
     # wavelength checks (same reasoning as excluding `flm` from channel
-    # count, see tests/test_logic.py).
+    # count, see scripts/probes/logic.py).
     r'2xfyve|fyve': 'FYVE domain (PI3P probe, fused to GFP/mScarlet -- not a separate channel)',
 }
 
