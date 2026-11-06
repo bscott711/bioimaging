@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- 2026-11 review: `docs/review/2026-11-review.md`, `docs/ROADMAP.md`; `CLAUDE.md` rewritten; README test command and paths corrected.
+
 ### Fixed
 - Deskew-only (no PSF) zarr datasets now have the same handedness as decon and the live lane. They used to read the symlink
   mirror (`zarr_mirror/`) with `inputAxisOrder='zxy'`, a lateral (y) mirror of the rot90 convention the measured PSF, the TIFF
@@ -26,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `opym-receive-backfill` / `opym-backfill-send` entry points and `deploy/opym-receive-backfill.service`: the SSH
   backfill of finished acquisitions from the acquisition PC (see opym_local `docs/SSH_BACKFILL.md`). A store the
   backfill finished carries `.opym_complete.json`; `_zarr_store_is_ready` treats it as complete without waiting out
-  the idle window. The service is not enabled by default.
+  the idle window. On Argus the service is installed, enabled and running.
 
 ### Fixed
 - A zarr acquisition staged while Globus was still copying it produced all-zero decon output, recorded as `done`.

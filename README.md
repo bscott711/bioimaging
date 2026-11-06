@@ -13,9 +13,10 @@ See [`CHANGELOG.md`](CHANGELOG.md) for what changed in each release.
 - Python 3.12+, [`uv`](https://docs.astral.sh/uv/)
 - A sibling clone of `opym_local` at `../opym_local` — `bioimaging`'s
   `pyproject.toml` installs `opym` as an editable path dependency
-  (`../opym_local`), so both repos must be checked out next to each other:
+  (`../opym_local`), so both repos must be checked out next to each other.
+  On Argus both live under `~/projects/science/`:
   ```
-  projects/
+  projects/science/
     bioimaging/
     opym_local/
   ```
@@ -31,7 +32,7 @@ See [`CHANGELOG.md`](CHANGELOG.md) for what changed in each release.
 
 ```bash
 git clone <opym_local-repo-url> opym_local
-git clone <bioimaging-repo-url> bioimaging   # must be a sibling of opym_local
+git clone <bioimaging-repo-url> bioimaging   # must be a sibling of opym_local (on Argus: ~/projects/science/)
 cd bioimaging
 uv sync
 ```
@@ -43,34 +44,43 @@ Installed as console scripts via `uv sync` (see `pyproject.toml`
 
 | Command           | What it does                                                                        |
 |-------------------|--------------------------------------------------------------------------------------|
-| `naparym`         | napari GUI front end for the pipeline (`run_napari_opym.py`)                         |
-| `opym <dir>`      | CLI pipeline: GPFS OME-TIFF → GPU decon/DSR → Zarr                                    |
+| `naparym`         | napari GUI front end (`run_napari_opym.py`). **Known broken** (unpacks a 4-tuple plan as 3, waits on a queue dir that no longer exists); do not rely on it |
+| `opym <dir>`      | Intended: CLI pipeline (`run_pipeline_cli.py`). **Shadowed**: opym registers a script named `opym` too and `.venv/bin/opym` is opym's own CLI. Run `python run_pipeline_cli.py <dir>` |
 | `opym-serve`      | GPU supervisor: keeps one PetaKit5D MATLAB server per GPU running over the job queue |
 | `opym-receive`    | Streaming ingress for frames pushed live from acquisition; hosts the live lane        |
 | `opym-stream-watch` | Acquisition-side client: streams a local `*.ome.zarr` store's new timepoints to `opym-receive` |
+| `opym-receive-backfill` | Receiver for the SSH backfill of finished acquisitions from the rig PC (loopback `127.0.0.1:5556`) |
+| `opym-backfill-send` | Rig-side sender for that backfill (the rig runs pymmcore-gui's own copy) |
 | `opym-backfill`   | Process every acquisition under the data roots (`backfill/`); `--watch SECONDS` keeps running |
+| `opym-storage-triage` | Read-only storage suggestions (`scan`, `hash`, `report`, `verify`); see `docs/STORAGE_TRIAGE_RULES.md`. The PI deletes |
 | `naparym-live`    | Follow a live acquisition (or open a finished dataset's OME-Zarr) in napari           |
 | `opym-live-trace` | Per-hop latency report for a live session, last plane acquired to napari screen       |
 
-`opym-serve`, `opym-receive`, `naparym-live`, `opym-live-trace` and
-`opym-stream-watch` are implemented in the `opym` package
-(`opym.local_gpu_worker`, `opym.stream.receiver`, `opym.live_view`,
-`opym.stream.trace_report`, `opym.stream.client`); this repo only registers
-the console scripts.
+`opym-serve`, `opym-receive`, `opym-receive-backfill`, `opym-backfill-send`,
+`naparym-live`, `opym-live-trace` and `opym-stream-watch` are implemented in
+the `opym` package (`opym.local_gpu_worker`, `opym.stream.receiver`,
+`opym.stream.backfill_receiver`, `opym.stream.backfill_client`,
+`opym.live_view`, `opym.stream.trace_report`, `opym.stream.client`); this repo
+only registers the console scripts. (`opym-add-times` is in the venv because
+opym is installed there; this repo does not register it.)
 
-Also:
+Tests: the safe command is in [`CLAUDE.md`](CLAUDE.md) ("Run and test"). Do
+not use `uv run pytest` or a bare `pytest`: `tests/` holds scratch files that run
+at import, and one of them rewrites benchmark data on `/mmfs2`. Run it from a
+repo or worktree root only.
+
 ```bash
-uv run pytest tests/ --ignore-glob='tests/test_dock*.py'   # test suite
 just dcv                # start a DCV remote-desktop session (see JustFile)
 ```
-
-The `tests/test_dock*.py` files are GUI scripts that start napari when
-imported, and two of them error at collection, so they are skipped above.
 
 `opym-backfill` options: `--roots`, `--registry-path`, `--workers`,
 `--dry-run` (discovery only, no writes), `--discover-only` (register datasets
 as pending, do no work), `--poll-interval`, `--mip-fps`, `--decon-psf`,
-`--reprocess-legacy-decon`, `--watch`. See `opym-backfill --help`.
+`--reprocess-legacy-decon`, `--retry-failed`, `--watch`. See
+`opym-backfill --help`. Without `--roots` it walks three default roots
+(`/mmfs1/.../jacks.local/microscopy`, `/mmfs1/.../bscott/DataUpload`,
+`/mmfs2/.../bscott/DataUpload`, listed in `run_backfill_cli.py`) and uses the
+default registry `/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3`.
 
 ## Backfill
 
@@ -104,6 +114,19 @@ resumable and a finished dataset costs one lookup per pass.
   processed OME-Zarr store (see below), the backfill takes it as the finished
   result and builds MIP movies from its Z-MIP series instead of re-deriving
   them from TIFFs.
+- **Readiness.** A zarr store is staged only when it has a pixel array and has
+  been idle for 15 minutes (`OPYM_ZARR_SETTLE_SECONDS`, default 900), or carries
+  `.opym_complete.json` (written by the SSH backfill). OME-TIFF datasets have no
+  such gate yet (see the 2026-11 review, CL-03).
+- **Live index.** A thread inside the watch loop (`backfill/live_index.py`)
+  registers streamed sessions in the registry within seconds, while they are
+  still being acquired.
+- **Pools** use a `forkserver` context; a stage that fails 3 times in a row is
+  skipped until `--retry-failed`.
+- **Storage triage** (`opym-storage-triage`, `backfill/storage_triage/`) only
+  suggests what could be deleted; the PI deletes. Rules and handoff:
+  `docs/STORAGE_TRIAGE_RULES.md`, `docs/STORAGE_TRIAGE_HANDOFF.md` (a
+  2026-10-15 snapshot).
 
 ## Live lane
 
@@ -133,18 +156,32 @@ repo: `docs/STREAMING_PROTOCOL.md` and `docs/live-view-pipeline.md`.
 
 `deploy/` tracks the systemd user units the pipeline runs as, so the installed
 copies can be diffed against the repo (an installed unit once lost
-`--decon-psf` that way). Install a unit with `cp deploy/<unit> ~/.config/systemd/user/`
-then `systemctl --user daemon-reload`; restart `opym-receive` between
-acquisitions, not during one. Each unit's `WorkingDirectory=` and `ExecStart=`
-show where it expects this repo to be checked out.
+`--decon-psf` that way). `diff deploy/<unit> ~/.config/systemd/user/<unit>` first:
+the `opym-live-qc.service` template still has the old `%h/projects/CORE` path
+(live: `%h/projects/science/CORE`), so copying it would break live QC. To install,
+`cp deploy/<unit> ~/.config/systemd/user/` then `systemctl --user daemon-reload`;
+restart `opym-receive` between acquisitions, not during one. Each unit's
+`WorkingDirectory=` and `ExecStart=` show where it expects this repo to be checked
+out (on Argus, `~/projects/science/bioimaging`). `opym-logrotate.conf` is not
+copied: the service renders it from the checkout, so pulling the checkout changes
+rotation at once.
+
+Pulling the production checkout is a partial deploy; pull and restart together.
+`opym-backfill`, `opym-receive` and `opym-receive-backfill` start with `uv run`,
+which re-syncs the production `.venv` on every (re)start; `opym-serve` runs
+`.venv/bin/opym-serve` directly.
 
 | Unit                     | Runs                                            | Role |
 |--------------------------|-------------------------------------------------|------|
 | `opym-serve.service`     | `opym-serve`                                    | GPU supervisor. Live tickets go first; a hung ticket's server is killed and the ticket requeued (at most twice). |
-| `opym-receive.service`   | `opym-receive`                                  | Streaming ingress with RAM-disk staging and the live lane. |
+| `opym-receive.service`   | `opym-receive`                                  | Streaming ingress with RAM-disk staging and the live lane (loopback `127.0.0.1:5555`). |
+| `opym-receive-backfill.service` | `opym-receive-backfill`                  | Receiver for the SSH backfill from the rig (loopback `127.0.0.1:5556`, reached through an SSH tunnel); `Nice=15`, idle IO. Enabled and running on Argus. |
 | `opym-backfill.service`  | `opym-backfill --watch 120 --decon-psf <psf>`   | Continuous backfill with decon on. |
 | `opym-live-qc.service`   | CORE's `celldet-live-qc` (from CORE's own venv)  | Live per-timepoint QC, CPU only. |
 | `opym-logrotate.timer`   | `logrotate` on `opym-logrotate.conf`, hourly    | Rotates the service logs at 50 MB (4 kept, gzipped, `copytruncate`). Enable with `systemctl --user enable --now opym-logrotate.timer`. |
+
+Other services this pipeline feeds, with their own repos and units: opym-dashboard
+(port 8420), opym-viewer (8421), naparym-live-host.
 
 Each unit appends its output to `logs/<unit>.log` in the checkout (git-ignored),
 because `journalctl --user` is not readable on the host. Every unit sets
@@ -169,7 +206,14 @@ Environment variables the units and backfill use:
 | `OPYM_KEEP_DECON_INTERMEDIATES` | backfill | Keep the decon staging and `Decon/` TIFFs. |
 | `OPYM_OUTPUT_FORMAT` | backfill | `tiff`, `ome-zarr` or `both` (default) when the raw store does not say. |
 | `OPYM_SKIP_VIEWER_EXPORT` | backfill | Skip the OME-TIFF stamping and OME-Zarr export. |
-| `OPYM_ZARR_DEFAULT_Z_STEP`, `OPYM_ZARR_ALLOW_DEFAULT_Z_STEP`, `OPYM_ZARR_MAX_TIMEPOINTS` | backfill | z-step fallback for stores missing one; cap on timepoints per dataset for test runs. |
+| `OPYM_ZARR_DEFAULT_Z_STEP`, `OPYM_ZARR_ALLOW_DEFAULT_Z_STEP`, `OPYM_ZARR_MAX_TIMEPOINTS` | backfill | z-step fallback for stores missing one (the backfill unit sets 0.5, which turns the refuse-to-guess guard off); cap on timepoints per dataset for test runs. |
+| `OPYM_ZARR_SETTLE_SECONDS` | backfill | Idle time a zarr store needs before it is staged. Default 900. |
+| `PETAKIT_JOBS_DIR` | backfill, opym | Queue, lease and claim directory. Default `/dev/shm/petakit_jobs`. |
+| `OPYM_BACKFILL_LOG_SEEN_DIR` | backfill | Where log-once markers live. Default `<jobs dir>/log_seen`. |
+| `OPYM_BACKFILL_DIR` | storage triage | Work dir for `opym-storage-triage`. Default `/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill`. |
+| `OPYM_STREAM_CLIENT_LOG_DIR` | receiver | Where rig client logs land (`logs/rig`). |
+| `OPYM_SERVE_SERVERS` | opym-serve | GPU server layout for the supervisor (read in opym; see its docs). |
+| `OPYM_BACKFILL_RAW_ROOTS`, `OPYM_BACKFILL_BIND`, `OPYM_BACKFILL_SETTLE_SECONDS` | opym-receive-backfill | Allowed raw roots, bind address, and settle time of the SSH backfill receiver. |
 | `OPYM_STREAM_STAGE_ROOT` | receiver | RAM-disk staging root; unset writes straight to each session's raw root. |
 | `OPYM_LIVE_LANE`, `OPYM_LIVE_FORMAT`, `OPYM_LIVE_QC` | receiver | Enable the live lane, select the one-format (`zarr`) lane, write QC sidecars. |
 | `OPYM_SERVE_HANG_MIN`, `OPYM_SERVE_KILL_HUNG` | opym-serve | Minutes without output before a claim is flagged; kill the hung server. |
@@ -186,7 +230,9 @@ ChimeraX. `naparym-live` opens that OME-Zarr too.
 
 ## Viewing older output in ChimeraX (manual step)
 
-There is no `chimerax` command from this repo. To open a bare
+There is no `chimerax` command from this repo. The `chimerax-ngff` bundle (its own
+repo) opens our OME-Zarr in ChimeraX; use it first. The wrapper below is the older
+fallback. To open a bare
 `*_processed.zarr` (the crop and channel-remap store, e.g.
 `processed_ngff/<name>_processed.zarr`) in ChimeraX:
 
@@ -234,13 +280,18 @@ before merging, not just by reading numbers.
 ## Repo layout
 
 - `run_pipeline_cli.py`, `run_napari_opym.py`, `run_backfill_cli.py` — entry points
-- `psf_tools/` — PSF measurement, channel/fluorophore detection
+- `psf_tools/` — PSF measurement, channel/fluorophore detection, decon trial tooling
 - `backfill/` — the backfill pipeline: triage, crop, deskew tickets, MIP movies, viewer export
-- `scripts/` — profiling, MIP export, Zarr/ChimeraX conversion helpers (non-production)
+- `backfill/storage_triage/` — read-only storage suggestions
+- `scripts/` — profiling, MIP export, Zarr/ChimeraX conversion helpers (non-production), `storage_triage_notebook/`
+- `data/` — bead coordinates, PSF json and png (small files; PSF TIFFs are not tracked)
+- `docs/` — storage triage rules and handoff; `docs/review/` and `ROADMAP.md` hold the 2026-11 review and plan
 - `matlab_legacy/` — legacy standalone MATLAB demo scripts
-- `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, `opym-live-qc` (live per-timepoint QC, runs from `~/projects/CORE`), and the `opym-logrotate` timer
-- `CHANGELOG.md` — release notes
+- `deploy/` — systemd user units: `opym-serve`, `opym-backfill`, `opym-receive`, `opym-receive-backfill`, `opym-live-qc` (live per-timepoint QC, runs from `~/projects/science/CORE`), and the `opym-logrotate` timer
+- `CHANGELOG.md` — release notes; `uv.lock` — pinned environment
 - `scratch/` — throwaway scripts, never promoted into the library
-- `tests/` — pytest suite
+- `tests/` — pytest suite plus scratch files that must not be run (see `CLAUDE.md` for the safe command)
 
-See `CLAUDE.md` for the detailed data-flow architecture and boundaries.
+See `CLAUDE.md` for the services layout, production notes and the safe test command,
+and [`docs/review/2026-11-review.md`](docs/review/2026-11-review.md) /
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the current review and plan.
