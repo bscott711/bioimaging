@@ -1149,18 +1149,20 @@ def decon_provenance_matches(registry, dataset_key: str, psf: Path | None) -> bo
 def zarr_deskew_data_dir(ds: LeafDataset, psf: Path | None) -> Path:
     """The ticket `dataDir` for a KIND_ZARR_PRECROPPED dataset.
 
-    Deskew-only reads the cheap symlink mirror; decon reads the materialized
-    `(ny, nx, nz)` TIFFs (see `build_decon_staging_dir` for why it cannot
-    share the mirror). PetaKit5D writes its DS/DSR/Decon output *inside*
-    whichever of these is the `dataDir`, so `_dsr_dir_for` in
-    `backfill/cli.py` must resolve through here too.
+    Every zarr dataset, decon or deskew-only, reads the materialized
+    `(ny, nx, nz)` TIFFs in `decon_stage/` (see `build_decon_staging_dir`
+    for why: that is the one canonical handedness). The old deskew-only
+    symlink mirror (`zarr_mirror/`) is no longer written; outputs already
+    in it are left alone. PetaKit5D writes its DS/DSR/Decon output *inside*
+    the `dataDir`, so `_dsr_dir_for` in `backfill/cli.py` must resolve
+    through here too. `psf` is kept in the signature for the callers.
 
     Resolved through `resolve_output_base()` like every other output path,
     so a KIND_ZARR_PRECROPPED dataset under an unwritable raw dir gets its
     staging dir mirrored too, rather than failing at mkdir the same way the
     TIFF-path crop stage used to.
     """
-    return resolve_output_base(ds.leaf_dir) / ("decon_stage" if psf else "zarr_mirror")
+    return resolve_output_base(ds.leaf_dir) / "decon_stage"
 
 
 def build_decon_staging_dir(
@@ -1173,6 +1175,13 @@ def build_decon_staging_dir(
 ) -> Path:
     """Materialize a zarr-precropped acquisition as per-timepoint TIFFs in the
     `(ny, nx, nz)` layout PetaKit5D's deconvolution requires.
+
+    This is the canonical staging for EVERY zarr dataset, deskew-only
+    included (decided 2026-11-05). The rot90 `(ny, nx, nz)` orientation is
+    the handedness the measured PSF, the legacy TIFF cropper and the live
+    lane all use. Reading the symlink mirror with `inputAxisOrder='zxy'`
+    (a pure transpose) gives the y-mirror of it, so deskew-only output from
+    the mirror was a lateral mirror image of the decon and live output.
 
     Why this exists rather than reusing the symlink mirror: deconvolution is
     a 3D convolution, and PetaKit5D's decon path (XR_decon_data_wrapper ->
@@ -1378,26 +1387,28 @@ def parse_dsr_frame_names(dsr_dir: Path) -> set[tuple[int, int]]:
 def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path | None:
     """`submit_deskew_ticket`'s counterpart for `KIND_ZARR_PRECROPPED`
     datasets: no crop stage exists for these (already cropped/channel-split
-    at capture time), so this dispatches directly against a symlink mirror
-    of the raw per-channel zarr stores (see `build_zarr_pyramid_mirror`).
+    at capture time), so this dispatches directly against rot90-staged
+    `(ny, nx, nz)` TIFFs of the raw per-channel zarr stores (see
+    `build_decon_staging_dir`), with or without a PSF.
 
     `channel_patterns` for a single-timepoint dataset are the exact member
     filenames (e.g. `["bead_005_GFP_488.ome.zarr", ...]`), not a bare
     shared prefix -- PetaKit5D's channel matching is substring
     `contains()`-based, and a bare prefix like "cell" would also match an
-    unrelated sibling dataset's file. For a time series, the mirror is
-    exploded to `<prefix>_C<ch>_T<ttt>.zarr` per timepoint (see
-    `build_zarr_pyramid_mirror`), and the patterns become `_C0_T`, `_C1_T`,
-    ... -- unambiguous because the mirror directory is this dataset's own
+    unrelated sibling dataset's file. For a time series, the staging is
+    exploded to `<prefix>_C<ch>_T<ttt>.tif` per timepoint (see
+    `build_decon_staging_dir`), and the patterns become `_C0_T`, `_C1_T`,
+    ... -- unambiguous because the staging directory is this dataset's own
     private output namespace, never shared with a sibling dataset.
 
-    `input_target` is the mirror directory (this dataset's own output
+    `input_target` is the staging directory (this dataset's own output
     namespace, not the raw dir) so `submit_remote_deskew_job`'s TIFF-
     redirection logic (which only triggers when `input_target.is_file()`)
     is a no-op here, and PetaKit5D writes its DSR_nodecon output *inside*
-    the mirror (`ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"`, confirmed
-    against a real completed job -- not a sibling of it, see `_dsr_dir_for`
-    in `backfill/cli.py`) -- i.e. still fully within `ds.leaf_dir`, never
+    it (`ds.leaf_dir / "decon_stage" / "DSR_nodecon"`; the layout was
+    confirmed against a real completed job when the dir was still called
+    `zarr_mirror` -- not a sibling of it, see `_dsr_dir_for` in
+    `backfill/cli.py`) -- i.e. still fully within `ds.leaf_dir`, never
     colliding with a sibling dataset sharing the same raw directory.
     """
     decon_psf = resolve_decon_psf()
@@ -1466,7 +1477,11 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     # re-run that then fails loses the old result. That is the same trade the
     # `failed`-only version already made, now applied consistently.
     _clean_stale_deskew_output(dsr_output_dir(data_dir, decon_psf))
-    _clean_stale_deskew_output(data_dir / "Decon")
+    if decon_psf:
+        # Deskew-only shares this directory now; a Decon/ here is a previous
+        # deconvolved result, not stale output of the run being submitted, so
+        # turning decon off must not delete it.
+        _clean_stale_deskew_output(data_dir / "Decon")
 
     mda_settings_file = ds.raw_dir / "MDA_settings.yaml"
     # Prefer the stores' own `z` coordinate array over the MDA_settings.yaml
@@ -1525,27 +1540,20 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
 
     n_timepoints = dataset_timepoints(ds)
     env_cap = int(os.environ.get("OPYM_ZARR_MAX_TIMEPOINTS", "0")) or None
-    # Cap the mirror at the timepoints every channel actually wrote rather
+    # Cap the staging at the timepoints every channel actually wrote rather
     # than the count the stores declare (see `channel_store_timepoints`).
     max_t = n_timepoints if env_cap is None else min(n_timepoints, env_cap)
-    if decon_psf:
-        # Decon needs real (ny, nx, nz) pixels, not the mirror's (z, y, x)
-        # view -- see build_decon_staging_dir. Submitting with
-        # zarr_input=False then makes input_axis_order derive to 'yxz', i.e.
-        # no permute, exactly like the legacy OME-TIFF path.
-        input_dir = build_decon_staging_dir(
-            ds.channel_zarr_paths,
-            data_dir,
-            dataset_prefix=ds.leaf_dir.name,
-            max_timepoints=max_t,
-        )
-    else:
-        input_dir = build_zarr_pyramid_mirror(
-            ds.channel_zarr_paths,
-            data_dir,
-            dataset_prefix=ds.leaf_dir.name,
-            max_timepoints=max_t,
-        )
+    # Decon AND deskew-only both stage real rot90 (ny, nx, nz) pixels, not the
+    # mirror's (z, y, x) view -- see build_decon_staging_dir. Submitting with
+    # zarr_input=False then makes input_axis_order derive to 'yxz', i.e. no
+    # permute, exactly like the legacy OME-TIFF path and the live lane. (The
+    # mirror + 'zxy' gave the y-mirror of that handedness.)
+    input_dir = build_decon_staging_dir(
+        ds.channel_zarr_paths,
+        data_dir,
+        dataset_prefix=ds.leaf_dir.name,
+        max_timepoints=max_t,
+    )
     if n_timepoints > 1:
         # Exploded per-timepoint frames -> match every frame of a channel.
         # Safe (not the usual full-filename pattern) because the input dir
@@ -1553,8 +1561,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         channel_patterns = [f"_C{i}_T" for i in range(len(ds.channel_zarr_paths))]
     else:
         # Strip only the container extension, so the `.ome` component
-        # survives and the pattern matches both the mirror's `<name>.ome.zarr`
-        # and the staged `<name>.ome.tif`.
+        # survives and the pattern matches the staged `<name>.ome.tif`.
         channel_patterns = [p.name.removesuffix(".zarr") for p in ds.channel_zarr_paths]
 
     ticket_path = _admitted_submit(
@@ -1566,7 +1573,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
         channel_patterns=channel_patterns,
         save_mip=True,
         **deskew_decon_kwargs(decon_psf),
-        zarr_input=decon_psf is None,
+        zarr_input=False,
     )
     if ticket_path is None:
         return None

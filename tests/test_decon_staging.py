@@ -209,8 +209,8 @@ def test_only_one_real_timepoint_uses_single_timepoint_naming(tmp_path):
 
 
 def test_zarr_mirror_only_one_real_timepoint_uses_single_timepoint_naming(tmp_path):
-    """`build_zarr_pyramid_mirror` (the deskew-only, non-decon counterpart)
-    has the identical naming decision and the identical bug potential --
+    """`build_zarr_pyramid_mirror` (the old deskew-only counterpart, no longer
+    used by the backfill since 2026-11-05 but kept in the library) has the identical naming decision and the identical bug potential --
     same fix, same reasoning as
     `test_only_one_real_timepoint_uses_single_timepoint_naming` above.
     """
@@ -1096,3 +1096,142 @@ def test_log_once_repeats_only_a_changed_notice(capsys):
     assert log_once("k", "b")
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 3 and all(" [backfill] " in ln for ln in lines)
+
+
+# --- deskew-only zarr path: same handedness as decon and live (2026-11-05) -
+#
+# The user decided the rot90 convention (measured PSF, legacy TIFF cropper,
+# live lane) is correct. Deskew-only used to read the symlink mirror with
+# inputAxisOrder='zxy' (a pure transpose), a y-mirror of it. These pin that
+# the no-PSF submit now stages the same rot90 TIFFs and tells PetaKit5D not
+# to permute them. Each fails on the old mirror behaviour.
+
+
+def _deskew_only_scenario(two_channel_store, monkeypatch):
+    from backfill import pipeline
+
+    stores, volumes, tmp_path = two_channel_store
+    monkeypatch.delenv("OPYM_DECON_PSF", raising=False)
+    monkeypatch.setenv("OPYM_ZARR_DEFAULT_Z_STEP", "0.5")
+    submitted = []
+
+    def _fake_submit(**kw):
+        submitted.append(kw)
+        ticket = tmp_path / "ticket.json"
+        ticket.write_text("{}")
+        return ticket
+
+    monkeypatch.setattr(pipeline, "submit_remote_deskew_job", _fake_submit)
+    ds = SimpleNamespace(
+        kind=KIND_ZARR_PRECROPPED,
+        leaf_dir=tmp_path,
+        raw_dir=tmp_path,
+        dataset_key="k",
+        master_file=tmp_path / "raw.ome.tif",
+        channel_zarr_paths=tuple(stores),
+    )
+    return pipeline, ds, _FakeRegistry(), submitted, volumes, tmp_path
+
+
+def test_deskew_only_zarr_submit_stages_rot90_tiffs_and_does_not_permute(
+    two_channel_store, monkeypatch
+):
+    pipeline, ds, registry, submitted, volumes, tmp_path = _deskew_only_scenario(
+        two_channel_store, monkeypatch
+    )
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+
+    kw = submitted[0]
+    assert kw["psf_path"] is None
+    # zarr_input=True would make input_axis_order 'zxy' (the y-mirror).
+    assert kw["zarr_input"] is False
+    stage = tmp_path / "decon_stage"
+    assert kw["input_target"] == stage
+    assert kw["dsr_dir_name"] == "DSR_nodecon"
+    assert kw["channel_patterns"] == ["_C0_T", "_C1_T"]
+    for c in range(2):
+        for t in range(3):
+            staged = tifffile.imread(stage / f"{tmp_path.name}_C{c}_T{t:03d}.tif")
+            assert np.array_equal(staged, orient_zyx_for_decon_tiff(volumes[c][t]))
+    # The symlink mirror is no longer built for deskew-only.
+    assert not (tmp_path / "zarr_mirror").exists()
+
+
+def test_deskew_only_and_decon_stage_identical_pixels(two_channel_store, monkeypatch):
+    """Same handedness by construction: the PSF changes the ticket, not the
+    staged pixels."""
+    pipeline, ds, registry, submitted, _volumes, tmp_path = _deskew_only_scenario(
+        two_channel_store, monkeypatch
+    )
+    pipeline.submit_zarr_deskew_ticket(ds, registry)
+    stage = tmp_path / "decon_stage"
+    no_psf = {p.name: tifffile.imread(p) for p in stage.glob("*.tif")}
+    assert no_psf
+
+    psf = tmp_path / "psf.tif"
+    psf.write_bytes(b"psf")
+    monkeypatch.setenv("OPYM_DECON_PSF", str(psf))
+    with_psf = build_decon_staging_dir(ds.channel_zarr_paths, tmp_path / "with_psf", dataset_prefix=tmp_path.name)
+    assert {p.name for p in with_psf.glob("*.tif")} == set(no_psf)
+    for name, arr in no_psf.items():
+        assert np.array_equal(arr, tifffile.imread(with_psf / name))
+
+
+def test_deskew_only_resubmit_leaves_an_earlier_decon_result_alone(two_channel_store, monkeypatch):
+    """Deskew-only now shares decon_stage/ with decon runs, so turning decon
+    off must clear its own DSR_nodecon but not delete a Decon/ result."""
+    pipeline, ds, registry, submitted, _volumes, tmp_path = _deskew_only_scenario(
+        two_channel_store, monkeypatch
+    )
+    decon_result = tmp_path / "decon_stage" / "Decon" / "DSR_decon" / "cell_001_C0_T000.tif"
+    decon_result.parent.mkdir(parents=True)
+    decon_result.write_bytes(b"deconvolved")
+    stale = tmp_path / "decon_stage" / "DSR_nodecon" / "parameters.mat"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"half written")
+
+    assert pipeline.submit_zarr_deskew_ticket(ds, registry) is not None
+
+    assert decon_result.exists(), "deskew-only submit deleted an earlier decon result"
+    assert not stale.exists(), "stale DSR_nodecon was not cleared"
+
+
+def test_deskew_only_output_is_looked_up_under_decon_stage(two_channel_store, monkeypatch):
+    from backfill import cli
+
+    _pipeline, ds, _registry, _submitted, _volumes, tmp_path = _deskew_only_scenario(
+        two_channel_store, monkeypatch
+    )
+    assert cli._dsr_dir_for(ds) == tmp_path / "decon_stage" / "DSR_nodecon"
+
+
+def test_reaper_drops_deskew_only_staging_and_keeps_the_dsr_output(tmp_path, monkeypatch):
+    """Staging replaced the mirror for deskew-only, so it must be reaped
+    after mip_encode too -- without touching DSR_nodecon or a Decon/ result."""
+    from backfill import cli
+
+    leaf = tmp_path / "Cell_001"
+    stage = leaf / "decon_stage"
+    dsr = stage / "DSR_nodecon"
+    dsr.mkdir(parents=True)
+    (dsr / "Cell_001_C0_T000.tif").write_bytes(b"final DSR")
+    (stage / "Cell_001_C0_T000.tif").write_bytes(b"staged input")
+    earlier_decon = stage / "Decon" / "DSR_decon"
+    earlier_decon.mkdir(parents=True)
+    (earlier_decon / "Cell_001_C0_T000.tif").write_bytes(b"earlier decon DSR")
+
+    monkeypatch.delenv("OPYM_DECON_PSF", raising=False)
+    monkeypatch.delenv("OPYM_KEEP_DECON_INTERMEDIATES", raising=False)
+    ds = SimpleNamespace(
+        kind=KIND_ZARR_PRECROPPED,
+        leaf_dir=leaf,
+        dataset_key="k",
+        master_file=leaf / "raw.ome.tif",
+        channel_zarr_paths=[],
+    )
+    cli._reap_decon_intermediates(ds)
+
+    assert not (stage / "Cell_001_C0_T000.tif").exists(), "staged input kept"
+    assert (dsr / "Cell_001_C0_T000.tif").exists(), "DSR_nodecon output was deleted"
+    assert (earlier_decon / "Cell_001_C0_T000.tif").exists(), "earlier decon result was deleted"

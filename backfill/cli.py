@@ -175,19 +175,22 @@ def _dsr_dir_for(ds: LeafDataset) -> Path:
     this dataset.
 
     Both the directory NAME (`DSR_nodecon` vs `DSR_decon`) and, for
-    KIND_ZARR_PRECROPPED, its PARENT (`zarr_mirror/` vs `decon_stage/`)
-    depend on whether deconvolution is enabled, so both are derived from the
+    KIND_ZARR_PRECROPPED, its PARENT (`decon_stage/`, once
+    `zarr_mirror/` for deskew-only) and the `Decon/` nesting
+    depend on whether deconvolution is enabled, so all are derived from the
     same helpers `submit_*_deskew_ticket` used when naming the output --
     never restated here. Restating them is exactly how this function went
     wrong twice before. KIND_ZARR_PRECROPPED has no crop stage, so the ticket's
-    `dataDir` is the mirror or staging dir under `ds.leaf_dir` (see
+    `dataDir` is the staging dir under `ds.leaf_dir` (see
     `submit_zarr_deskew_ticket` / `zarr_deskew_data_dir`)
     -- confirmed against a real completed job that PetaKit5D writes
     `DSR_nodecon` *inside* that `dataDir`, not as its sibling: the previous
     `ds.leaf_dir / "DSR_nodecon"` (one level too shallow) caused every real
     zarr-precropped dataset to report "No MIP TIFFs found" even though
     PetaKit5D had already written complete output one directory deeper, at
-    `ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"`. Everything else must
+    `ds.leaf_dir / "zarr_mirror" / "DSR_nodecon"` (now `decon_stage/`;
+    outputs written under `zarr_mirror/` before 2026-11-05 are the old,
+    mirrored handedness and are not looked up). Everything else must
     resolve the same way `submit_remote_deskew_job` resolved its `dataDir`
     when the ticket was submitted (prefers the master-stem-named crop dir
     over the legacy `processed_tiff_series_split/` one) -- hardcoding the
@@ -204,7 +207,10 @@ def _dsr_dir_for(ds: LeafDataset) -> Path:
 
 
 def _reap_decon_intermediates(ds: LeafDataset) -> None:
-    """Drop the two large decon intermediates once DSR + MIPs exist.
+    """Drop the large intermediates once DSR + MIPs exist.
+
+    For a zarr dataset that is the staged `(ny, nx, nz)` TIFFs, with or
+    without decon (deskew-only stages them too since 2026-11-05).
 
     Deconvolution costs roughly three extra copies of the raw data on disk:
     the staged `(ny, nx, nz)` TIFFs, PetaKit5D's `Decon/` output, and the
@@ -222,6 +228,11 @@ def _reap_decon_intermediates(ds: LeafDataset) -> None:
         return
     psf = resolve_decon_psf()
     if psf is None:
+        if ds.kind == KIND_ZARR_PRECROPPED:
+            # Deskew-only: nothing but the staged input to drop. Never touch
+            # a `Decon/` here -- it would be an earlier deconvolved result.
+            for frame in zarr_deskew_data_dir(ds, psf).glob("*.tif"):
+                frame.unlink(missing_ok=True)
         return
     if ds.kind == KIND_ZARR_PRECROPPED:
         data_dir = zarr_deskew_data_dir(ds, psf)
@@ -373,8 +384,8 @@ def _run_mip_encode_locked(
             log(f"{ds.dataset_key}: MIP movies from {store.name}; it is the viewer export")
             return
         if ds.kind == KIND_ZARR_PRECROPPED and dataset_timepoints(ds) > 1:
-            # Time series: the mirror was exploded to per-timepoint frames
-            # named `<prefix>_C<c>_T<ttt>.zarr` (see build_zarr_pyramid_mirror),
+            # Time series: the staging was exploded to per-timepoint frames
+            # named `<prefix>_C<c>_T<ttt>.tif` (see build_decon_staging_dir),
             # so PetaKit5D's MIP output is a `_C{c}_T{t}_MIP_z.tif` series --
             # exactly what the legacy movie builder consumes.
             build_mip_movies_for_dataset(dsr_dir, ds.leaf_dir.name, movies_dir, fps=mip_fps)

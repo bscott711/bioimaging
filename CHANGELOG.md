@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Deskew-only (no PSF) zarr datasets now have the same handedness as decon and the live lane. They used to read the symlink
+  mirror (`zarr_mirror/`) with `inputAxisOrder='zxy'`, a lateral (y) mirror of the rot90 convention the measured PSF, the TIFF
+  cropper and the live lane use. Every zarr dataset now stages rot90 `(ny, nx, nz)` TIFFs in `decon_stage/` and submits with
+  `zarr_input=False`; deskew-only output is `decon_stage/DSR_nodecon`, and the staged TIFFs are reaped after `mip_encode`. Existing
+  `zarr_mirror/DSR_nodecon` outputs (~44 datasets, 2026-09-24..28) are still the old mirrored handedness and have not been re-run.
+
 ### Added
 - The viewer export copies the raw stores' real per-volume acquisition times into the OME-Zarr it builds or reuses
   (`viewer_export._record_times`, via `opym.timeline`): `.zattrs["opym_time"]` and the real median interval on the time axis, in
