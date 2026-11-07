@@ -29,7 +29,7 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Ours: `opym-backfill`, `opym-storage-triage`. From opym: `opym-serve`, `opym-receive`, `opym-receive-backfill`,
   `opym-backfill-send`, `opym-stream-watch`, `opym-live-trace`.
 - `opym` (and `opym-add-times`) is opym's own CLI; this repo no longer registers a script of that name. The `opym[server]` dependency
-  keeps every script name above resolving, so the units' `uv run opym-receive` etc. are unchanged.
+  keeps every script name above resolving, so the units keep starting the same scripts (via `.venv/bin/` in the `deploy/` templates, via `uv run` in the installed units until item 2 is deployed).
 - Contracts (display encoding and palette, completion marker and lock names, z-step env rule, registry path) are imported from opym, never
   copied here: `opym.display`, `opym.stream.bfill`, `opym.metadata.zarr_fallback_z_step`, `opym.registry`. Tests use `opym.testing.*` fixtures
   and a `StatusRegistry` subclass for the fake registry. This repo needs `opym[server]` (the base opym is numpy-only).
@@ -41,15 +41,16 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 ## How production runs
 
 - Live units in `~/.config/systemd/user`, run FROM this checkout and its `.venv`: `opym-serve`, `opym-receive`,
-  `opym-receive-backfill`, `opym-backfill` (`--watch 120 --decon-psf <20260910 PSF>`), `opym-logrotate.timer`.
+  `opym-receive-backfill`, `opym-backfill` (`--watch 120`; installed unit passes `--decon-psf <20260910 PSF>`, the `deploy/` template takes `OPYM_DECON_PSF` from `opym-decon.env`), `opym-logrotate.timer`.
   `opym-live-qc` runs CORE's `celldet-live-qc`. Ports: 5555 receiver, 5556 backfill receiver (loopback),
   8420 dashboard, 8421 viewer.
 - Env that matters (table in README): `OPYM_BACKFILL_REGISTRY_PATH` (`/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3`),
   `OPYM_DECON_PSF` (set in three places that must agree), `OPYM_ZARR_DEFAULT_Z_STEP=0.5` (PL-04),
   `OPYM_BACKFILL_MAX_INFLIGHT=4`, `PETAKIT_JOBS_DIR=/dev/shm/petakit_jobs`, `OPYM_LIVE_*`.
 - Logs: `logs/<unit>.log` (git-ignored), rotated hourly at 50 MB, 4 kept, `copytruncate`. `journalctl --user` is unreadable.
-- Pulling this checkout, or opym, is a partial deploy: pull and restart the units together, and only when asked. The three
-  `uv run` units re-sync the production `.venv` on every restart (OR-02). `opym-logrotate` reads its config from this checkout.
+- Pulling this checkout, or opym, is a partial deploy: pull and restart the units together, and only when asked. The `deploy/` templates run
+  `.venv/bin/<script>` (no re-sync); the INSTALLED units still run `uv run` and re-sync the production `.venv` on every
+  restart (OR-02) until item 2 is deployed (the user's go). `opym-logrotate` reads its config from this checkout.
 - **This main needs opym_local >= `b9189d2419c47f0736b188307f4a76f08002cd65`** (`b9189d2`; it imports `opym.store.leaf_for_store`, `dsr_store_name`, `viewer_store_path`, `mip_movies_dir` and the path-name constants). Production opym_local was at `ae1846e` on 2026-11-06; that
   version declares neither `opym[server]` nor the scripts bioimaging no longer registers, and lacks `opym.display`,
   `zarr_fallback_z_step`, `registry_path`, `opym.stream.bfill` constants and the health readers. Pulling bioimaging alone

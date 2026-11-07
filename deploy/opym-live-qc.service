@@ -9,7 +9,7 @@ Type=simple
 # session through <jobs>/live_latest.json, reads the raw-projection sidecars
 # opym-receive writes with OPYM_LIVE_QC=1, and writes verdicts to the
 # dataset's <leaf>/qc/, which opym-receive forwards to the acquisition GUI.
-WorkingDirectory=%h/projects/CORE
+WorkingDirectory=%h/projects/science/CORE
 # CPU only: the GPUs belong to the PetaKit5D servers. The YOLO shadow is a
 # ~0.1 s CPU inference per channel per timepoint.
 Environment=CUDA_VISIBLE_DEVICES=
@@ -21,7 +21,7 @@ Environment=PYTHONUNBUFFERED=1
 # single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
 # does the same in-process (opym.live_view.no_hugepage_stalls).
 Environment=NUMPY_MADVISE_HUGEPAGE=0
-ExecStart=%h/projects/CORE/.venv/bin/celldet-live-qc --jobs /dev/shm/petakit_jobs
+ExecStart=%h/projects/science/CORE/.venv/bin/celldet-live-qc --jobs /dev/shm/petakit_jobs
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host; see opym-receive.service.
