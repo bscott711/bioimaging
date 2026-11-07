@@ -157,15 +157,23 @@ repo: `docs/STREAMING_PROTOCOL.md` and `docs/live-view-pipeline.md`.
 
 `deploy/` tracks the systemd user units the pipeline runs as, so the installed
 copies can be diffed against the repo (an installed unit once lost
-`--decon-psf` that way). `diff deploy/<unit> ~/.config/systemd/user/<unit>` first:
-the `opym-live-qc.service` template still has the old `%h/projects/CORE` path
-(live: `%h/projects/science/CORE`), so copying it would break live QC. To install,
-`cp deploy/<unit> ~/.config/systemd/user/` then `systemctl --user daemon-reload`;
-restart `opym-receive` between acquisitions, not during one. Each unit's
-`WorkingDirectory=` and `ExecStart=` show where it expects this repo to be checked
-out (on Argus, `~/projects/science/bioimaging`). `opym-logrotate.conf` is not
-copied: the service renders it from the checkout, so pulling the checkout changes
-rotation at once.
+`--decon-psf` that way). `diff deploy/<unit> ~/.config/systemd/user/<unit>` before
+copying. To install, `cp deploy/<unit> ~/.config/systemd/user/` then
+`systemctl --user daemon-reload`; restart `opym-receive` between acquisitions, not
+during one. Each unit's `WorkingDirectory=` and `ExecStart=` show where it expects
+this repo to be checked out (on Argus, `~/projects/science/bioimaging`).
+
+`opym-backfill.service` and `opym-receive.service` both take `OPYM_DECON_PSF` from
+one `EnvironmentFile=`, `deploy/opym-decon.env`, which is installed next to the
+units (`cp deploy/opym-decon.env ~/.config/systemd/user/`). Install it BEFORE the
+two units, and pre-flight with `test -f ~/.config/systemd/user/opym-decon.env`:
+a missing file stops the unit (and `opym-receive` stops all streaming ingest), it
+does not fall back to deskew-only. Change the PSF there and restart both; they
+cannot disagree. `opym-backfill` no longer passes `--decon-psf` (the flag
+only set this same variable in-process and still works for a manual run).
+
+`opym-logrotate.conf` is not copied: `opym-logrotate.service` renders it from the
+checkout at every run, so pulling the checkout changes log rotation at once.
 
 Pulling the production checkout is a partial deploy; pull and restart together.
 
@@ -174,16 +182,19 @@ production was at `ae1846e`, which lacks `opym[server]`, `opym.display`, `zarr_f
 `opym.stream.bfill` / `opym.stream.outcome` additions. Pull `opym_local` and `bioimaging` in one step, then restart
 `opym-receive`, `opym-receive-backfill`, `opym-backfill`, and last `opym-serve` (it has no re-sync of its own). Pulling
 either one alone breaks the units.
-`opym-backfill`, `opym-receive` and `opym-receive-backfill` start with `uv run`,
-which re-syncs the production `.venv` on every (re)start; `opym-serve` runs
-`.venv/bin/opym-serve` directly.
+All four pipeline units (`opym-backfill`, `opym-receive`, `opym-receive-backfill`,
+`opym-serve`) run their script from `.venv/bin/` directly. They no longer use
+`uv run`, which re-synced the production `.venv` on every (re)start. The
+consequence: after a `git pull` that changes `pyproject.toml` or `uv.lock`, the
+environment is NOT updated by a restart; run an attended `uv sync` in the
+checkout first (with the units stopped), then restart.
 
 | Unit                     | Runs                                            | Role |
 |--------------------------|-------------------------------------------------|------|
 | `opym-serve.service`     | `opym-serve`                                    | GPU supervisor. Live tickets go first; a hung ticket's server is killed and the ticket requeued (at most twice). |
 | `opym-receive.service`   | `opym-receive`                                  | Streaming ingress with RAM-disk staging and the live lane (loopback `127.0.0.1:5555`). |
 | `opym-receive-backfill.service` | `opym-receive-backfill`                  | Receiver for the SSH backfill from the rig (loopback `127.0.0.1:5556`, reached through an SSH tunnel); `Nice=15`, idle IO. Enabled and running on Argus. |
-| `opym-backfill.service`  | `opym-backfill --watch 120 --decon-psf <psf>`   | Continuous backfill with decon on. |
+| `opym-backfill.service`  | `opym-backfill --watch 120` (PSF from `opym-decon.env`) | Continuous backfill with decon on. Holds a single-instance lock (below). |
 | `opym-live-qc.service`   | CORE's `celldet-live-qc` (from CORE's own venv)  | Live per-timepoint QC, CPU only. |
 | `opym-logrotate.timer`   | `logrotate` on `opym-logrotate.conf`, hourly    | Rotates the service logs at 50 MB (4 kept, gzipped, `copytruncate`). Enable with `systemctl --user enable --now opym-logrotate.timer`. |
 
@@ -200,13 +211,23 @@ first-touch allocations stall in kernel compaction.
 run it once with `--retry-failed`.
 
 `opym-receive` and `opym-backfill` must agree on `OPYM_DECON_PSF` and
-`OPYM_BACKFILL_REGISTRY_PATH`; the units set both to the same values.
+`OPYM_BACKFILL_REGISTRY_PATH`; both units read the PSF from `opym-decon.env` and
+set the registry path to the same value.
+
+Only one `opym-backfill` can run per registry on this host: it takes a non-blocking
+`flock` on `.opym-backfill.lock` beside the registry file (`flock` is node-local on
+GPFS, which is enough because only micro001 runs the backfill). If the lock itself
+cannot be taken (an errno other than "already held"), it prints a WARNING and runs
+without the guard rather than exiting. A manual one-shot or
+`--retry-failed` while the service runs exits with status 1 and a message; stop the
+service first (`systemctl --user stop opym-backfill`). `--dry-run` writes nothing
+and is allowed alongside the service.
 
 Environment variables the units and backfill use:
 
 | Variable | Read by | Meaning |
 |----------|---------|---------|
-| `OPYM_DECON_PSF` | backfill, receiver | PSF for decon. Unset or empty means deskew-only. `--decon-psf` sets it in-process for `opym-backfill`. |
+| `OPYM_DECON_PSF` | backfill, receiver | PSF for decon. Unset or empty means deskew-only. The units set it from `deploy/opym-decon.env`; `--decon-psf` sets it in-process for a manual `opym-backfill` run. |
 | `OPYM_BACKFILL_REGISTRY_PATH` | backfill, receiver | Status registry. The receiver uses it to forget an earlier run whose name a new run reuses. |
 | `OPYM_BACKFILL_MAX_INFLIGHT` | backfill | Cap on backfill tickets queued or running. Unset means no cap. |
 | `OPYM_DECON_REPROCESS_LEGACY` | backfill | Same as `--reprocess-legacy-decon`. |

@@ -8,7 +8,10 @@ Thin orchestrator, matching the run_pipeline_cli.py convention: business logic l
 """
 
 import argparse
+import errno
+import fcntl
 import os
+import sys
 from pathlib import Path
 
 from backfill.cli import DEFAULT_REGISTRY_PATH, run_backfill, watch_backfill
@@ -19,6 +22,57 @@ DEFAULT_ROOTS = [
     Path("/mmfs1/scratch/SDSMT.LOCAL/bscott/DataUpload"),
     Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload"),
 ]
+
+
+LOCK_NAME = ".opym-backfill.lock"
+
+
+class AlreadyRunningError(RuntimeError):
+    """Another opym-backfill orchestrator holds the lock beside the registry."""
+
+
+def acquire_single_instance_lock(registry_path: Path):
+    """Take a non-blocking exclusive flock on ``<registry dir>/.opym-backfill.lock``.
+
+    Two orchestrators on one registry share its pool, tickets and stage
+    transitions, so a manual one-shot or ``--retry-failed`` run while the
+    ``opym-backfill`` service is mid-pass must not start. The lock is held for
+    as long as the returned file object stays open (keep a reference for the
+    life of the process); the kernel drops it when the process exits, so a
+    crashed service never leaves a stale lock behind. Returns None (after a
+    warning on stderr) if the lock itself cannot be taken for a reason other
+    than a live holder. ``flock`` is node-local on GPFS, which is enough: only
+    micro001 runs the backfill.
+    """
+    lock_path = Path(registry_path).expanduser().parent / LOCK_NAME
+    handle = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if handle is not None:
+            handle.close()
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise AlreadyRunningError(
+                f"another opym-backfill is already running on this registry (lock {lock_path}). "
+                "Stop it first (systemctl --user stop opym-backfill) before a manual run "
+                "or --retry-failed; --dry-run is allowed while it runs."
+            ) from None
+        # Any other failure (ENOLCK, EOPNOTSUPP, EIO, an unwritable dir...) is not
+        # "already running": exiting 1 would put the service in a restart loop.
+        name = errno.errorcode.get(exc.errno, str(exc.errno))
+        print(
+            f"[backfill] WARNING: single-instance lock unavailable ({name}): "
+            "running WITHOUT the guard",
+            file=sys.stderr,
+        )
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
 
 
 def main():
@@ -119,6 +173,16 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    # Before anything writes to the registry (including --retry-failed). A
+    # dry run is a read-only preview and may run beside the service. Bound to
+    # a name so the lock lives as long as the process.
+    if not args.dry_run:
+        try:
+            _instance_lock = acquire_single_instance_lock(args.registry_path)
+        except AlreadyRunningError as exc:
+            print(f"[backfill] {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # Exported rather than threaded through as an argument: the backfill fans
     # datasets out across a process pool, and an env var reaches every worker

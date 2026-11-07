@@ -25,7 +25,9 @@ Environment=PYTHONUNBUFFERED=1
 Nice=15
 IOSchedulingClass=idle
 CPUWeight=20
-ExecStart=%h/.local/bin/uv run opym-receive-backfill
+# Venv script, not `uv run` (which re-syncs the production .venv on every restart);
+# a dependency change needs an attended `uv sync`.
+ExecStart=%h/projects/science/bioimaging/.venv/bin/opym-receive-backfill
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host (see opym-receive.service).

@@ -6,9 +6,13 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/projects/science/bioimaging
 Environment=OPYM_BACKFILL_REGISTRY_PATH=/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/registry.sqlite3
-# Decon is opt-in, and carried here rather than only in the installed copy so a
-# reinstall from this repo cannot silently revert production to deskew-only.
-Environment=OPYM_DECON_PSF=/mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# Decon is opt-in. OPYM_DECON_PSF comes from the one file opym-receive.service
+# also reads (installed from deploy/opym-decon.env), so the two cannot disagree;
+# it replaces the former --decon-psf flag, which only set this same variable
+# in-process (opym.decon_config.resolve_decon_psf reads it either way). The file
+# has no leading "-", so a missing file stops the unit instead of silently
+# running deskew-only.
+EnvironmentFile=%h/.config/systemd/user/opym-decon.env
 # Named z step for stores that ship without their own `z` coordinate array (an
 # interrupted or still-transferring acquisition). pipeline.py refuses to guess
 # by default rather than deskew at a silently wrong scale; 0.3 (the
@@ -33,7 +37,9 @@ Environment=PYTHONUNBUFFERED=1
 # single allocations up to 1.9 s, vs 15 s with this set). Opt out; naparym-live
 # does the same in-process (opym.live_view.no_hugepage_stalls).
 Environment=NUMPY_MADVISE_HUGEPAGE=0
-ExecStart=%h/.local/bin/uv run opym-backfill --watch 120 --decon-psf /mmfs2/scratch/SDSMT.LOCAL/bscott/DataUpload/PSF/20260910_averaged_psf.tif
+# Run the venv script, not `uv run`: `uv run` re-syncs the production .venv on every
+# (re)start. A dependency change needs an attended `uv sync` instead.
+ExecStart=%h/projects/science/bioimaging/.venv/bin/opym-backfill --watch 120
 Restart=on-failure
 RestartSec=10
 # journalctl --user is not readable on this host (see opym-receive.service).
