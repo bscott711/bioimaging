@@ -41,10 +41,7 @@ from opym import ome_zarr_writer  # noqa: E402
 from opym.ome_zarr_writer import DSR_VOXEL_UM, PYRAMID_LEVELS  # noqa: E402,F401
 from opym.stream.live import channel_label as live_channel_label  # noqa: E402
 
-try:  # real per-volume acquisition times; an older opym lacks it (see _record_times)
-    from opym import timeline
-except ImportError:  # pragma: no cover - depends on which opym is installed
-    timeline = None
+from opym import timeline  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -241,8 +238,6 @@ def _record_times(zarr_path: Path, raw_stores=None) -> str:
     summary. Never raises: the times are metadata, and the export must not fail
     over them.
     """
-    if timeline is None:
-        return "not recorded: this opym predates opym.timeline"
     try:
         raws = list(raw_stores) if raw_stores is not None else timeline.raw_stores_for(zarr_path)
         if not timeline.sync_processed(zarr_path, raws):

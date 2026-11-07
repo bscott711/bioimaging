@@ -39,7 +39,7 @@ from opym.ome_zarr_writer import complete_timepoints, is_processed_store, read_p
 from opym.stream.live import live_status_is_fresh, live_viewer_store, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.stream import bfill
-from opym.stream.backfill_receiver import DEFAULT_SETTLE_S, LOCK_STALE_S
+from opym.stream.bfill import DEFAULT_SETTLE_S, LOCK_STALE_S
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
     OutputFormat,

@@ -50,6 +50,13 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Logs: `logs/<unit>.log` (git-ignored), rotated hourly at 50 MB, 4 kept, `copytruncate`. `journalctl --user` is unreadable.
 - Pulling this checkout, or opym, is a partial deploy: pull and restart the units together, and only when asked. The three
   `uv run` units re-sync the production `.venv` on every restart (OR-02). `opym-logrotate` reads its config from this checkout.
+- **This main needs opym_local >= `e6c18db75457858082aafeab8d2156ef4d408cdb`** (`e6c18db`). Production opym_local was at `ae1846e` on 2026-11-06; that
+  version declares neither `opym[server]` nor the scripts bioimaging no longer registers, and lacks `opym.display`,
+  `zarr_fallback_z_step`, `registry_path`, `opym.stream.bfill` constants and the health readers. Pulling bioimaging alone
+  makes `opym-receive`, `opym-receive-backfill` and `.venv/bin/opym-serve` disappear and `opym-backfill` fail at import;
+  pulling opym_local alone drops msgpack, ome-types and others from the venv. So: pull opym_local and bioimaging in ONE step,
+  then restart receive, receive-backfill, backfill, and last serve (it runs `.venv/bin/opym-serve` with no re-sync of its own).
+  Never pull one of them alone.
 - Never edit, switch branch in, or run `uv run` / `uv sync` in `~/projects/science/bioimaging`; work in a worktree
   under `~/projects/.worktrees/bioimaging/<topic>`.
 

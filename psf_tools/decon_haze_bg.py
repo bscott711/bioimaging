@@ -28,6 +28,7 @@ the 3 um footprint ~10 um along the scan axis and under 1 um along x.
 from __future__ import annotations
 
 import numpy as np
+from opym.store import XY_PIXEL_SIZE_UM
 from scipy import ndimage as ndi
 
 CAMERA_OFFSET = 100.0  # counts, exactly 100 on this camera (memory: project_decon_reenable)
@@ -41,7 +42,7 @@ def _to_yxz(vol: np.ndarray, axes: str) -> tuple[np.ndarray, list[int]]:
     return np.transpose(vol, order), [int(i) for i in np.argsort(order)]
 
 
-def haze_floor(vol: np.ndarray, *, axes: str, xy_um: float = 0.136, dz_um: float = 0.5, open_um: float = 3.0,
+def haze_floor(vol: np.ndarray, *, axes: str, xy_um: float = XY_PIXEL_SIZE_UM, dz_um: float = 0.5, open_um: float = 3.0,
                smooth_um: float = 3.0, ds: int = 4) -> np.ndarray:
     """Smooth lower envelope of ``vol`` (same shape and axis order), float32, computed on a ``ds``-times coarser lateral grid.
     y, x are at ``xy_um``, z is the scan step ``dz_um`` (skewed space)."""

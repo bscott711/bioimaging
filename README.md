@@ -168,6 +168,12 @@ copied: the service renders it from the checkout, so pulling the checkout change
 rotation at once.
 
 Pulling the production checkout is a partial deploy; pull and restart together.
+
+**Version coupling.** This bioimaging needs `opym_local` >= `e6c18db75457858082aafeab8d2156ef4d408cdb` (`e6c18db`):
+production was at `ae1846e`, which lacks `opym[server]`, `opym.display`, `zarr_fallback_z_step`, `registry_path` and the
+`opym.stream.bfill` / `opym.stream.outcome` additions. Pull `opym_local` and `bioimaging` in one step, then restart
+`opym-receive`, `opym-receive-backfill`, `opym-backfill`, and last `opym-serve` (it has no re-sync of its own). Pulling
+either one alone breaks the units.
 `opym-backfill`, `opym-receive` and `opym-receive-backfill` start with `uv run`,
 which re-syncs the production `.venv` on every (re)start; `opym-serve` runs
 `.venv/bin/opym-serve` directly.
