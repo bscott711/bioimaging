@@ -292,7 +292,7 @@ dependencies = [
     { name = "napari", extra = ["all"] },
     { name = "napari-ome-zarr" },
     { name = "ndv", extra = ["qt", "vispy"] },
-    { name = "opym" },
+    { name = "opym", extra = ["server"] },
     { name = "pypetakit5d" },
     { name = "pyqt6-webengine" },
     { name = "tifffile" },
@@ -316,7 +316,7 @@ requires-dist = [
     { name = "napari", extras = ["all"], specifier = ">=0.7.0" },
     { name = "napari-ome-zarr", specifier = "<0.7" },
     { name = "ndv", extras = ["qt", "vispy"], specifier = ">=0.5.0" },
-    { name = "opym", editable = "../opym_local" },
+    { name = "opym", extras = ["server"], editable = "../opym_local" },
     { name = "pypetakit5d", specifier = ">=1.4.6" },
     { name = "pyqt6-webengine", specifier = ">=6.11.0" },
     { name = "tifffile", specifier = "<2024.8.10" },
@@ -2295,15 +2295,21 @@ name = "opym"
 version = "0.5.0"
 source = { editable = "../opym_local" }
 dependencies = [
+    { name = "numpy" },
+]
+
+[package.optional-dependencies]
+server = [
     { name = "imagecodecs" },
     { name = "msgpack" },
-    { name = "numpy" },
+    { name = "numcodecs" },
     { name = "ome-types" },
     { name = "pypetakit5d" },
     { name = "pyyaml" },
     { name = "pyzmq" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "tifffile" },
     { name = "tqdm" },
     { name = "zarr" },
@@ -2312,29 +2318,37 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "bandit", marker = "extra == 'dev'" },
-    { name = "imagecodecs" },
+    { name = "imagecodecs", marker = "extra == 'server'" },
     { name = "ipyfilechooser", marker = "extra == 'viewer'" },
     { name = "ipython", marker = "extra == 'viewer'" },
     { name = "ipywidgets", marker = "extra == 'viewer'" },
     { name = "matplotlib", marker = "extra == 'viewer'" },
-    { name = "msgpack" },
+    { name = "msgpack", marker = "extra == 'server'" },
+    { name = "msgpack", marker = "extra == 'stream'" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "numcodecs", marker = "extra == 'server'" },
+    { name = "numcodecs", marker = "extra == 'stream'" },
     { name = "numpy" },
-    { name = "ome-types", specifier = ">=0.6" },
+    { name = "ome-types", marker = "extra == 'server'", specifier = ">=0.6" },
+    { name = "opym", extras = ["server", "viewer"], marker = "extra == 'all'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pypetakit5d" },
+    { name = "pypetakit5d", marker = "extra == 'server'" },
     { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pyyaml" },
-    { name = "pyzmq" },
+    { name = "pyyaml", marker = "extra == 'server'" },
+    { name = "pyzmq", marker = "extra == 'server'" },
+    { name = "pyzmq", marker = "extra == 'stream'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "scikit-image" },
-    { name = "scikit-learn" },
-    { name = "tifffile" },
-    { name = "tqdm" },
-    { name = "zarr", marker = "python_full_version < '3.11'", specifier = "<3" },
-    { name = "zarr", marker = "python_full_version >= '3.11'", specifier = ">=2.18.7,<3" },
+    { name = "scikit-image", marker = "extra == 'server'" },
+    { name = "scikit-learn", marker = "extra == 'server'" },
+    { name = "scipy", marker = "extra == 'server'" },
+    { name = "tifffile", marker = "extra == 'server'" },
+    { name = "tqdm", marker = "extra == 'server'" },
+    { name = "zarr", marker = "python_full_version >= '3.11' and extra == 'server'", specifier = ">=2.18.7,<3" },
+    { name = "zarr", marker = "python_full_version >= '3.11' and extra == 'stream'", specifier = ">=2.18.7,<3" },
+    { name = "zarr", marker = "python_full_version < '3.11' and extra == 'server'", specifier = "<3" },
+    { name = "zarr", marker = "python_full_version < '3.11' and extra == 'stream'", specifier = "<3" },
 ]
-provides-extras = ["dev", "viewer"]
+provides-extras = ["stream", "server", "viewer", "all", "dev"]
 
 [[package]]
 name = "packaging"

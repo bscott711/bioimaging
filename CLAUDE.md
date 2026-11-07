@@ -19,7 +19,7 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - `backfill/`: `cli.py` discovery, pool, watch loop, ticket collection; `pipeline.py` staging, tickets, admission,
   outputs; `viewer_export.py`, `mip_movie.py`, `live_index.py`, `log.py`; `storage_triage/` (read-only suggestions,
   rules in `docs/STORAGE_TRIAGE_RULES.md`).
-- `run_backfill_cli.py`, `run_pipeline_cli.py`: drivers; the logic lives in `backfill/` and opym.
+- `run_backfill_cli.py`: the driver; the logic lives in `backfill/` and opym. `run_pipeline_cli.py` (the old one-off pipeline CLI) was retired; the two `psf_tools` sweeps that used its helpers call `opym.roi_detect` and `opym.metadata` directly.
 - `psf_tools/`: PSF and decon v2 trial tooling; only `extraction_plan` is on the production path.
 - `deploy/`: unit templates and `opym-logrotate.conf`. `tests/` (real tests only), `scripts/` (with `scripts/probes/`, manual probes), `scratch/`,
   `matlab_legacy/`, `data/` are not production.
@@ -28,7 +28,14 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 
 - Ours: `opym-backfill`, `opym-storage-triage`. From opym: `opym-serve`, `opym-receive`, `opym-receive-backfill`,
   `opym-backfill-send`, `opym-stream-watch`, `opym-live-trace`.
-- `opym` is SHADOWED: opym registers it too and `.venv/bin/opym` is opym's own CLI. Run `python run_pipeline_cli.py <dir>`.
+- `opym` (and `opym-add-times`) is opym's own CLI; this repo no longer registers a script of that name. The `opym[server]` dependency
+  keeps every script name above resolving, so the units' `uv run opym-receive` etc. are unchanged.
+- Contracts (display encoding and palette, completion marker and lock names, z-step env rule, registry path) are imported from opym, never
+  copied here: `opym.display`, `opym.stream.bfill`, `opym.metadata.zarr_fallback_z_step`, `opym.registry`. Tests use `opym.testing.*` fixtures
+  and a `StatusRegistry` subclass for the fake registry. This repo needs `opym[server]` (the base opym is numpy-only).
+  opym stays an editable path dependency (`../opym_local`, the production deploy of opym), so there is no SHA pin to bump: the contracts
+  in use are whatever opym checkout is deployed. After changing opym's extras, re-run `uv lock` with an opym worktree at `../opym_local`
+  (in a bioimaging worktree that path is `~/projects/.worktrees/bioimaging/opym_local`; remove it afterwards).
 - `naparym`, the old napari GUI (`run_napari_opym.py`), was retired 2026-11-06. `naparym-live` is a separate repo, deployed from `~/opt/naparym-live`; this repo no longer registers a `naparym-live` script.
 
 ## How production runs
@@ -43,6 +50,13 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Logs: `logs/<unit>.log` (git-ignored), rotated hourly at 50 MB, 4 kept, `copytruncate`. `journalctl --user` is unreadable.
 - Pulling this checkout, or opym, is a partial deploy: pull and restart the units together, and only when asked. The three
   `uv run` units re-sync the production `.venv` on every restart (OR-02). `opym-logrotate` reads its config from this checkout.
+- **This main needs opym_local >= `e6c18db75457858082aafeab8d2156ef4d408cdb`** (`e6c18db`). Production opym_local was at `ae1846e` on 2026-11-06; that
+  version declares neither `opym[server]` nor the scripts bioimaging no longer registers, and lacks `opym.display`,
+  `zarr_fallback_z_step`, `registry_path`, `opym.stream.bfill` constants and the health readers. Pulling bioimaging alone
+  makes `opym-receive`, `opym-receive-backfill` and `.venv/bin/opym-serve` disappear and `opym-backfill` fail at import;
+  pulling opym_local alone drops msgpack, ome-types and others from the venv. So: pull opym_local and bioimaging in ONE step,
+  then restart receive, receive-backfill, backfill, and last serve (it runs `.venv/bin/opym-serve` with no re-sync of its own).
+  Never pull one of them alone.
 - Never edit, switch branch in, or run `uv run` / `uv sync` in `~/projects/science/bioimaging`; work in a worktree
   under `~/projects/.worktrees/bioimaging/<topic>`.
 
@@ -64,7 +78,8 @@ unset OPYM_DECON_PSF OPYM_ZARR_DEFAULT_Z_STEP OPYM_LIVE_LANE OPYM_LIVE_FORMAT OP
 HOME=$T/home ~/projects/science/bioimaging/.venv/bin/python -m pytest -q -p no:cacheprovider -m "not gpu"
 ```
 
-237 pass (2026-11-06). The env vars cover paths the conftest does not redirect (log, mirror, backfill dir, PSF and lane
+241 pass (2026-11-06, against the `opym[server]` lock). To test against a fresh lock without touching the production `.venv`:
+`UV_PROJECT_ENVIRONMENT=<scratch>/venv uv sync --frozen` in the worktree, then use `<scratch>/venv/bin/python` above. The env vars cover paths the conftest does not redirect (log, mirror, backfill dir, PSF and lane
 settings). Never import a test module from another directory (conftest isolation is skipped).
 
 ## Gotchas

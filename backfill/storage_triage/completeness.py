@@ -12,6 +12,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from opym.store import PROGRESS_NAME, read_progress
+
 _FRAME = re.compile(r"_C(\d+)_T(\d+)\.tif$")
 
 
@@ -101,7 +103,7 @@ def _blank_by_chunk_sizes(rows: list[tuple[str, int]]) -> str | None:
     store (many of them) has the same size, the array is one repeated constant --
     the live lane and decon both wrote such all-zero stores whose progress file
     still said `complete`."""
-    meta = (".zarray", ".zattrs", ".zgroup", "zarr.json", ".opym_live.json")
+    meta = (".zarray", ".zattrs", ".zgroup", "zarr.json", PROGRESS_NAME)
     sizes = [s for r, s in rows if r.rsplit("/", 1)[-1] not in meta and s > 0]
     if len(sizes) >= MIN_CHUNKS_FOR_UNIFORMITY and len(set(sizes)) == 1:
         return f"blank: all {len(sizes)} chunks are the same {sizes[0]} bytes"
@@ -112,9 +114,8 @@ def _verify_live_progress(root: Path, expected_timepoints: int | None) -> tuple[
     """The live lane records completeness in `.opym_live.json`: state, n_t, n_c and
     every (t, c) written. Zarr writers skip all-zero chunks, so the chunk grid
     cannot prove completeness; this file can."""
-    try:
-        meta = json.loads((root / ".opym_live.json").read_text())
-    except (OSError, ValueError):
+    meta = read_progress(root)
+    if not isinstance(meta, dict):
         return None
     n_t, n_c = meta.get("n_t"), meta.get("n_c")
     if meta.get("state") != "complete":

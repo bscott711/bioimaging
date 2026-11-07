@@ -24,6 +24,8 @@ import tifffile
 import zarr
 
 from opym.discovery import KIND_ZARR_PRECROPPED
+from opym.registry import StatusRegistry
+from opym.testing.stream import LOCK_NAME, MARKER_FORMAT, MARKER_NAME
 from backfill.pipeline import (
     build_decon_staging_dir,
     build_zarr_pyramid_mirror,
@@ -329,10 +331,16 @@ def test_reaper_keeps_the_dsr_output(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-class _FakeRegistry:
-    """Only the four accessors the provenance/submit path actually touches."""
+class _FakeRegistry(StatusRegistry):
+    """`opym.registry.StatusRegistry` with dict rows instead of sqlite.
 
-    def __init__(self, rows=None):
+    A subclass, not a look-alike: `is_stage_done` is the real method, a method the
+    fake does not override reaches for the sqlite connection this never opens and fails
+    loudly (so a new accessor on the provenance/submit path cannot be silently missed),
+    and `test_fake_registry_signatures_match_the_real_one` pins every override's signature.
+    """
+
+    def __init__(self, rows=None):  # no super().__init__(): no sqlite file
         self.rows = rows or {}
         # The real `all_datasets()` selects * from datasets, so every row it
         # returns carries its own key. Mirror that rather than making each
@@ -341,51 +349,65 @@ class _FakeRegistry:
             row.setdefault("dataset_key", key)
         self.started = []
 
-    def _row(self, key):
-        return self.rows.setdefault(key, {"dataset_key": key})
+    def _row(self, dataset_key):
+        return self.rows.setdefault(dataset_key, {"dataset_key": dataset_key})
 
-    def get_stage(self, key, stage):
-        return self._row(key).get(f"stage:{stage}")
+    def get_stage(self, dataset_key, stage):
+        return self._row(dataset_key).get(f"stage:{stage}")
 
-    def is_stage_done(self, key, stage):
-        row = self.get_stage(key, stage)
-        return bool(row and row["status"] == "done")
+    def get_decon_psf(self, dataset_key):
+        return self._row(dataset_key).get("decon_psf")
 
-    def get_decon_psf(self, key):
-        return self._row(key).get("decon_psf")
+    def get_decon_params(self, dataset_key):
+        return self._row(dataset_key).get("decon_params")
 
-    def get_decon_params(self, key):
-        return self._row(key).get("decon_params")
+    def set_decon_psf(self, dataset_key, psf_path):
+        self._row(dataset_key)["decon_psf"] = psf_path
 
-    def set_decon_psf(self, key, value):
-        self._row(key)["decon_psf"] = value
+    def set_decon_params(self, dataset_key, params_fingerprint):
+        self._row(dataset_key)["decon_params"] = params_fingerprint
 
-    def set_decon_params(self, key, value):
-        self._row(key)["decon_params"] = value
+    def register_dataset(self, dataset_key, **kw):
+        self._row(dataset_key).update(kw)
 
-    def register_dataset(self, key, **kw):
-        self._row(key).update(kw)
+    def set_triage(self, dataset_key, **kw):
+        self._row(dataset_key)["triage"] = kw
 
-    def set_triage(self, key, **kw):
-        self._row(key)["triage"] = kw
+    def start_stage(self, dataset_key, stage, *, ticket_path=None):
+        self._row(dataset_key)[f"stage:{stage}"] = {"status": "running", "ticket_path": ticket_path}
+        self.started.append((dataset_key, stage))
 
-    def start_stage(self, key, stage, *, ticket_path=None):
-        self._row(key)[f"stage:{stage}"] = {"status": "running", "ticket_path": ticket_path}
-        self.started.append((key, stage))
-
-    def finish_stage(self, key, stage, *, status, output_path=None, ticket_path=None, error=None):
-        self._row(key)[f"stage:{stage}"] = {
+    def finish_stage(self, dataset_key, stage, *, status, output_path=None, ticket_path=None, error=None):
+        self._row(dataset_key)[f"stage:{stage}"] = {
             "status": status, "ticket_path": ticket_path, "output_path": output_path,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def reset_stage(self, key, stage):
-        row = self.get_stage(key, stage)
+    def reset_stage(self, dataset_key, stage):
+        row = self.get_stage(dataset_key, stage)
         if row:
             row["status"] = "pending"
 
     def all_datasets(self):
         return list(self.rows.values())
+
+
+def test_fake_registry_signatures_match_the_real_one():
+    """Each override takes only parameters the real method has, under the same names
+    (a **kwargs catch-all is fine); a renamed or dropped real parameter fails here."""
+    import inspect
+
+    for name, fake in vars(_FakeRegistry).items():
+        if name.startswith("_") or not callable(fake):
+            continue
+        real = getattr(StatusRegistry, name, None)
+        assert real is not None, f"_FakeRegistry.{name} does not exist on StatusRegistry"
+        real_names = set(inspect.signature(real).parameters)
+        fake_names = {
+            n for n, p in inspect.signature(fake).parameters.items()
+            if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
+        }
+        assert fake_names <= real_names, f"{name}: fake takes {fake_names - real_names} the real one lacks"
 
 
 def test_a_parameter_retune_clears_decon_output_from_the_previous_settings(
@@ -913,8 +935,8 @@ def _deskewed_with_current_settings(registry, pipeline, psf, finished_at):
 
 
 def _mark_backfilled(store, finished_at):
-    (Path(store) / ".opym_complete.json").write_text(
-        json.dumps({"format": 1, "state": "complete", "finished_at": finished_at})
+    (Path(store) / MARKER_NAME).write_text(
+        json.dumps({"format": MARKER_FORMAT, "state": "complete", "finished_at": finished_at})
     )
 
 
@@ -1021,8 +1043,8 @@ from backfill.pipeline import store_has_completion_marker
 
 
 def _mark(store: Path, **kw) -> None:
-    body = {"format": 1, "state": "complete", **kw}
-    (store / ".opym_complete.json").write_text(json.dumps(body))
+    body = {"format": MARKER_FORMAT, "state": "complete", **kw}
+    (store / MARKER_NAME).write_text(json.dumps(body))
 
 
 def test_marked_store_is_ready_even_though_it_was_just_written(two_channel_store, monkeypatch):
@@ -1033,11 +1055,11 @@ def test_marked_store_is_ready_even_though_it_was_just_written(two_channel_store
     assert _zarr_store_is_ready(stores[0])                 # marker: no idle window
 
 
-@pytest.mark.parametrize("body", [{"format": 2, "state": "complete"}, {"format": 1, "state": "writing"}, {}])
+@pytest.mark.parametrize("body", [{"format": MARKER_FORMAT + 1, "state": "complete"}, {"format": MARKER_FORMAT, "state": "writing"}, {}])
 def test_a_marker_that_does_not_say_complete_does_not_count(two_channel_store, monkeypatch, body):
     stores, _, _ = two_channel_store
     monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
-    (stores[0] / ".opym_complete.json").write_text(json.dumps(body))
+    (stores[0] / MARKER_NAME).write_text(json.dumps(body))
     assert not store_has_completion_marker(stores[0])
     assert not _zarr_store_is_ready(stores[0])
 
@@ -1045,7 +1067,7 @@ def test_a_marker_that_does_not_say_complete_does_not_count(two_channel_store, m
 def test_unreadable_marker_does_not_count(two_channel_store, monkeypatch):
     stores, _, _ = two_channel_store
     monkeypatch.setenv("OPYM_ZARR_SETTLE_SECONDS", "900")
-    (stores[0] / ".opym_complete.json").write_text("{not json")
+    (stores[0] / MARKER_NAME).write_text("{not json")
     assert not _zarr_store_is_ready(stores[0])
 
 
@@ -1054,7 +1076,7 @@ def test_unreadable_marker_does_not_count(two_channel_store, monkeypatch):
 # empty decon_stage/ each and an error line every 120 s pass.
 def _half_sent(store, lock_age_s):
     (Path(store) / ".zattrs").unlink()
-    lock = Path(store) / ".opym_backfill.lock"
+    lock = Path(store) / LOCK_NAME
     lock.write_text("EEP230-OPM")
     t = time.time() - lock_age_s
     os.utime(lock, (t, t))

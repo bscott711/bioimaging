@@ -349,13 +349,3 @@ def test_export_says_so_when_the_raw_stores_have_no_times(tmp_path):
     summary = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
     assert summary["times"] == "no real times in the raw stores"
     assert (viewer / "Cell_001_dsr.ome.zarr").is_dir()  # the export itself is unaffected
-
-
-def test_export_works_with_an_opym_that_predates_the_timeline(tmp_path, monkeypatch):
-    from backfill import viewer_export
-
-    monkeypatch.setattr(viewer_export, "timeline", None)
-    dsr, viewer = _dataset_with_raw_times(tmp_path)
-    summary = export_for_viewers(dsr, viewer, name="Cell_001", channel_labels=["GFP 488"])
-    assert summary["times"].startswith("not recorded")
-    assert (viewer / "Cell_001_dsr.ome.zarr").is_dir()

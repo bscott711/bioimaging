@@ -13,7 +13,7 @@ dependencies = [
     "napari[all]>=0.7.0",
     "napari-ome-zarr<0.7",
     "ndv[qt,vispy]>=0.5.0",
-    "opym",
+    "opym[server]",
     "pypetakit5d>=1.4.6",
     "pyqt6-webengine>=6.11.0",
     "tifffile<2024.8.10",
@@ -27,7 +27,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 include = [
-  "run_pipeline_cli.py",
   "run_backfill_cli.py",
   "psf_tools/",
   "backfill/",
@@ -60,12 +59,8 @@ dev = [
 ]
 
 [project.scripts]
-opym = "run_pipeline_cli:main"
-opym-serve = "opym.local_gpu_worker:main"
-opym-receive = "opym.stream.receiver:main"
-opym-live-trace = "opym.stream.trace_report:main"
-opym-stream-watch = "opym.stream.client:main"
-opym-receive-backfill = "opym.stream.backfill_receiver:main"
-opym-backfill-send = "opym.stream.backfill_client:main"
+# opym owns `opym`, `opym-serve`, `opym-receive`, `opym-receive-backfill`, `opym-backfill-send`,
+# `opym-stream-watch`, `opym-live-trace` (opym's pyproject); the names keep resolving here because
+# opym[server] is installed. Only bioimaging's own scripts are declared below.
 opym-backfill = "run_backfill_cli:main"
 opym-storage-triage = "backfill.storage_triage.cli:main"

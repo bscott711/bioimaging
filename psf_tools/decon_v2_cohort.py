@@ -24,18 +24,18 @@ from pathlib import Path
 
 import numpy as np
 
+from opym.lanes import live_lease_active
 from psf_tools import decon_v2_trial as T
 
 CAREAMICS_PY = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/decon_sweeps/envs/careamics/bin/python")
 CONTROLS = ["prod", "prod_cubic"]   # which of them reproduces the stored volume says how it was resampled
 ARMS = ["n2v_synL_bgv2"]   # N2V + the CORRECTED haze floor (`*_bgv2`) + the large synthetic PSF; the old `n2v_synL_bg` used the mislabelled-axes floor
-LEASE = Path(os.environ.get("PETAKIT_JOBS_DIR", "/dev/shm/petakit_jobs")) / "LIVE_LEASE.json"
 GATE_R = 0.9999
 
 
 def wait_for_live_lane(poll_s: float = 15.0) -> None:
     announced = False
-    while LEASE.exists() and time.time() - LEASE.stat().st_mtime <= 60.0:
+    while live_lease_active():
         if not announced:
             print("live lease active: pausing GPU work until the acquisition ends", flush=True)
             announced = True

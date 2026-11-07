@@ -18,6 +18,7 @@ from pathlib import Path
 import imageio.v3 as iio
 import numpy as np
 import tifffile
+from opym.display import color_rgb, default_channel_color
 
 _MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
 
@@ -34,17 +35,10 @@ _MIP_RE = re.compile(r"_C(\d+)_T(\d+)_MIP_z\.tif$")
 # choice -- not just a fix for this one machine.
 _VP9_PARAMS = ["-deadline", "realtime", "-cpu-used", "8", "-crf", "32", "-b:v", "0"]
 
-# Fixed per-channel pseudo-colors for the additive composite view (RGB,
-# 0-1 floats) -- green/magenta/yellow/red covers the 4-channel-per-excitation
-# output map (see core.py: 0=Bot-C0, 1=Top-C0, 2=Top-C1, 3=Bot-C1) with
-# maximally distinguishable hues; extra channels beyond 4 cycle back. The
-# common 2-channel case (one excitation) is green/magenta, not cyan/magenta.
-_CHANNEL_COLORS = [
-    (0.0, 1.0, 0.0),  # green
-    (1.0, 0.0, 1.0),  # magenta
-    (1.0, 1.0, 0.0),  # yellow
-    (1.0, 0.15, 0.15),  # red
-]
+def _channel_color(i: int) -> np.ndarray:
+    """Pseudo-color (RGB, 0-1 floats) of the i-th channel of an additive composite: opym's palette
+    (`opym.display.CHANNEL_COLORS`, green then magenta, never red-green), cycling past the fourth."""
+    return np.array(color_rgb(default_channel_color(i)), dtype=np.float32)
 
 
 def find_mip_files(mips_dir: Path) -> dict[int, list[tuple[int, Path]]]:
@@ -133,7 +127,7 @@ def encode_composite_movie(
 
     composite = np.zeros((t_len, *shape_yx, 3), dtype=np.float32)
     for i, c in enumerate(channels):
-        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        color = _channel_color(i)
         gray = channel_stacks[c].astype(np.float32) / 255.0  # (T, Y, X)
         composite += gray[..., None] * color
 
@@ -212,7 +206,7 @@ def build_poster_from_frames(
 
     blended = np.zeros((*next(iter(frames_u8.values())).shape, 3), dtype=np.float32)
     for i, frame_u8 in enumerate(frames_u8.values()):
-        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        color = _channel_color(i)
         blended += (frame_u8.astype(np.float32) / 255.0)[..., None] * color
     blended_u8 = (np.clip(blended, 0, 1.0) * 255.0).astype(np.uint8)
     return encode_poster_image(blended_u8, out_path)
@@ -234,7 +228,7 @@ def write_composite(
     # encode_composite_movie's internals).
     first_frame = np.zeros((*normalized_stacks[next(iter(normalized_stacks))].shape[1:], 3), dtype=np.float32)
     for i, c in enumerate(sorted(normalized_stacks)):
-        color = np.array(_CHANNEL_COLORS[i % len(_CHANNEL_COLORS)], dtype=np.float32)
+        color = _channel_color(i)
         first_frame += (normalized_stacks[c][0].astype(np.float32) / 255.0)[..., None] * color
     first_frame_u8 = (np.clip(first_frame, 0, 1.0) * 255.0).astype(np.uint8)
     written.append(encode_poster_image(first_frame_u8, composite_path.with_suffix(".jpg")))

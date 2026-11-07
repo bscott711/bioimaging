@@ -39,11 +39,12 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
+from opym.store import XY_PIXEL_SIZE_UM
 from scipy import ndimage as ndi
 
 from psf_tools.phase_retrieve_psf import zernike_noll
 
-XY_UM = 0.136
+XY_UM = XY_PIXEL_SIZE_UM
 THETA_DEG = 60.0
 MARGIN_UM = 6.0  # lab-grid margin: the FFT grid is periodic, so a defocused ring must not wrap
 

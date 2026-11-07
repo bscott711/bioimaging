@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import tifffile
+from opym.store import XY_PIXEL_SIZE_UM
 
 DEFAULT_NOLL_INDICES = (4, 5, 6, 7, 8, 9, 10, 11)
 
@@ -49,7 +50,7 @@ class PSFModelParams:
     na: float
     wavelength_um: float
     refractive_index: float
-    xy_pixel_size_um: float = 0.136
+    xy_pixel_size_um: float = XY_PIXEL_SIZE_UM
     dz_um: float = None
     zernike_noll_indices: tuple = DEFAULT_NOLL_INDICES
 
@@ -336,7 +337,7 @@ def _build_arg_parser():
                                         "emission wavelength (see EMISSION_WAVELENGTH_UM).")
     parser.add_argument("--n", dest="refractive_index", type=float, required=True,
                         help="Immersion/mounting medium refractive index.")
-    parser.add_argument("--xy-pixel-size-um", type=float, default=0.136)
+    parser.add_argument("--xy-pixel-size-um", type=float, default=XY_PIXEL_SIZE_UM)
     parser.add_argument("--dz-um", type=float, default=None,
                         help="PSF z-step in microns. If omitted, read from the input PSF's "
                              "ImageJ 'spacing' tag.")

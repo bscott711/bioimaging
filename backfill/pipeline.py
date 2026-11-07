@@ -26,12 +26,20 @@ import tifffile
 import zarr
 from opym.core import run_processing_job
 from opym.discovery import LeafDataset, parse_zarr_group_prefix
-from opym.metadata import parse_expected_timepoints, parse_z_step, resolve_zarr_z_step
+from opym.metadata import (
+    GUESSED_Z_STEP_UM,
+    parse_expected_timepoints,
+    parse_z_step,
+    resolve_zarr_z_step,
+    zarr_fallback_z_step,
+)
 from opym import lanes
 from opym.petakit import resolve_deskew_working_dir, submit_remote_deskew_job
 from opym.ome_zarr_writer import complete_timepoints, is_processed_store, read_progress
 from opym.stream.live import live_status_is_fresh, live_viewer_store, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
+from opym.stream import bfill
+from opym.stream.bfill import DEFAULT_SETTLE_S, LOCK_STALE_S
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
     OutputFormat,
@@ -645,7 +653,7 @@ def submit_deskew_ticket(
             pass
 
     paths = derive_paths(ds.master_file, OutputFormat.ZARR)  # only used for its metadata_file path
-    z_step_um = parse_z_step(paths.metadata_file, default_z_step=0.3)
+    z_step_um = parse_z_step(paths.metadata_file, default_z_step=GUESSED_Z_STEP_UM)
     channel_patterns_str = scan_channel_patterns(tiff_out_dir)
     channel_patterns = channel_patterns_str.split(", ") if channel_patterns_str else None
 
@@ -708,12 +716,10 @@ def _zarr_store_is_ready(store: Path) -> bool:
 # declare `fill_value: 0`, so a chunk that has not landed yet reads back as
 # silent zeros: staging one produced all-zero frames (and an all-zero eroded
 # mask, so all-zero decon) for every Cell_0xx dataset on 2026-10-14, recorded
-# as `done`. Override with OPYM_ZARR_SETTLE_SECONDS (tests set 0).
-ZARR_SETTLE_SECONDS_DEFAULT = 900.0
-
-
+# as `done`. Override with OPYM_ZARR_SETTLE_SECONDS (tests set 0). The default is the
+# backfill receiver's own settle window (opym).
 def _zarr_settle_seconds() -> float:
-    return float(os.environ.get("OPYM_ZARR_SETTLE_SECONDS", ZARR_SETTLE_SECONDS_DEFAULT))
+    return float(os.environ.get("OPYM_ZARR_SETTLE_SECONDS", DEFAULT_SETTLE_S))
 
 
 def store_newest_mtime(store: Path) -> float:
@@ -732,26 +738,15 @@ def store_newest_mtime(store: Path) -> float:
     return newest
 
 
-# The SSH backfill (opym.stream.backfill_receiver) writes `.opym_complete.json` into a store only after
+# The SSH backfill (opym.stream.backfill_receiver) writes a completion marker into a store only after
 # reading every volume back and matching the sender's SHA-256. A store with it is complete by an explicit
-# signal, so the idle-time heuristic below does not apply. (Read here, not imported: this repo must not
-# depend on which opym checkout is deployed. The contract is `format == 1` and `state == "complete"`.)
-COMPLETE_MARKER_NAME = ".opym_complete.json"
-
-
+# signal, so the idle-time heuristic below does not apply. The marker's name and format are opym's
+# (`opym.stream.bfill.read_marker`).
 def store_has_completion_marker(store: Path) -> bool:
-    try:
-        marker = json.loads((store / COMPLETE_MARKER_NAME).read_text())
-    except (OSError, ValueError):
-        return False
-    return marker.get("format") == 1 and marker.get("state") == "complete"
+    return bfill.read_marker(store) is not None
 
 
 STILL_ARRIVING = "is still arriving"
-# What opym.stream.backfill_receiver leaves in a store it is writing (read here, not
-# imported, like the marker), and how long it treats one as its own (LOCK_STALE_S).
-BACKFILL_LOCK_NAME = ".opym_backfill.lock"
-BACKFILL_LOCK_STALE_S = 600.0
 
 
 def store_not_ready_reason(store: Path, now: float | None = None) -> str | None:
@@ -763,11 +758,11 @@ def store_not_ready_reason(store: Path, now: float | None = None) -> str | None:
     now = now if now is not None else time.time()
     if not store_has_completion_marker(store):
         try:
-            lock_age = now - (store / BACKFILL_LOCK_NAME).stat().st_mtime
+            lock_age = now - (store / bfill.LOCK_NAME).stat().st_mtime
         except OSError:
             lock_age = None
         if lock_age is not None:
-            if lock_age < BACKFILL_LOCK_STALE_S:
+            if lock_age < LOCK_STALE_S:
                 return STILL_ARRIVING
             return ("was left part-way by an SSH backfill that stopped; "
                     "run opym-backfill-send again to finish it")
@@ -790,11 +785,11 @@ def backfill_completed_since_deskew(ds: LeafDataset, registry: StatusRegistry) -
     except (KeyError, TypeError, ValueError):
         return False
     for store in ds.channel_zarr_paths or ():
+        marker = bfill.read_marker(Path(store))
         try:
-            marker = json.loads((Path(store) / COMPLETE_MARKER_NAME).read_text())
-            if float(marker["finished_at"]) > deskewed_at:
+            if marker is not None and float(marker["finished_at"]) > deskewed_at:
                 return True
-        except (OSError, ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError):
             continue
     return False
 
@@ -1503,14 +1498,7 @@ def submit_zarr_deskew_ticket(ds: LeafDataset, registry: StatusRegistry) -> Path
     # store is missing its coordinate arrays but the real step is known --
     # e.g. from sibling acquisitions in the same session -- name the value
     # with OPYM_ZARR_DEFAULT_Z_STEP=<um> instead of accepting 0.3.
-    allow_default = os.environ.get("OPYM_ZARR_ALLOW_DEFAULT_Z_STEP")
-    explicit_default = os.environ.get("OPYM_ZARR_DEFAULT_Z_STEP")
-    if explicit_default:
-        fallback_z: float | None = float(explicit_default)
-    elif allow_default:
-        fallback_z = 0.3
-    else:
-        fallback_z = None
+    fallback_z = zarr_fallback_z_step()
     z_step_um, z_step_source = resolve_zarr_z_step(
         ds.channel_zarr_paths,
         mda_settings_file,

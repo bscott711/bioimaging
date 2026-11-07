@@ -39,11 +39,9 @@ import tifffile
 # timepoint by timepoint during acquisition; see export_for_viewers.
 from opym import ome_zarr_writer  # noqa: E402
 from opym.ome_zarr_writer import DSR_VOXEL_UM, PYRAMID_LEVELS  # noqa: E402,F401
+from opym.stream.live import channel_label as live_channel_label  # noqa: E402
 
-try:  # real per-volume acquisition times; an older opym lacks it (see _record_times)
-    from opym import timeline
-except ImportError:  # pragma: no cover - depends on which opym is installed
-    timeline = None
+from opym import timeline  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -85,17 +83,9 @@ def parse_dsr_frames(
 
 
 def channel_label(zarr_name: str) -> str:
-    """`Cell_002_GFP_488.ome.zarr` -> `GFP 488`.
-
-    Falls back to the whole stem when the name doesn't carry a
-    `<dataset>_<fluor>_<wavelength>` tail, so an unexpected name degrades to
-    something readable instead of raising.
-    """
-    stem = zarr_name.removesuffix(".zarr").removesuffix(".ome")
-    parts = stem.split("_")
-    if len(parts) >= 2 and parts[-1].isdigit():
-        return f"{parts[-2]} {parts[-1]}"
-    return stem
+    """`Cell_002_GFP_488.ome.zarr` -> `GFP 488` (opym's label rule on the store's stem; a name
+    without a `<fluor>_<wavelength>` tail degrades to the whole stem)."""
+    return live_channel_label(zarr_name.removesuffix(".zarr").removesuffix(".ome"))
 
 
 def stamp_ome_tiff(path: Path, *, voxel_um: float = DSR_VOXEL_UM, channel: str | None = None) -> bool:
@@ -248,8 +238,6 @@ def _record_times(zarr_path: Path, raw_stores=None) -> str:
     summary. Never raises: the times are metadata, and the export must not fail
     over them.
     """
-    if timeline is None:
-        return "not recorded: this opym predates opym.timeline"
     try:
         raws = list(raw_stores) if raw_stores is not None else timeline.raw_stores_for(zarr_path)
         if not timeline.sync_processed(zarr_path, raws):
