@@ -39,6 +39,7 @@ from opym.ome_zarr_writer import complete_timepoints, is_processed_store, read_p
 from opym.stream.live import live_status_is_fresh, live_viewer_store, read_live_status
 from opym.registry import StatusRegistry, master_file_fingerprint
 from opym.stream import bfill
+from opym.store import mip_movies_dir
 from opym.stream.bfill import DEFAULT_SETTLE_S, LOCK_STALE_S
 from opym.roi_detect import EXPECTED_H, EXPECTED_W, auto_detect_rois, compute_reference_projection
 from opym.utils import (
@@ -437,7 +438,7 @@ def detect_rois(
                 f"recovered {actual_timepoints} real timepoint(s)"
             )
         _write_triage_preview(
-            max_proj, resolve_output_base(ds.leaf_dir) / "mip_movies" / "triage_preview.jpg"
+            max_proj, mip_movies_dir(resolve_output_base(ds.leaf_dir)) / "triage_preview.jpg"
         )
 
         registry.finish_stage(ds.dataset_key, "roi_detect", status="done")

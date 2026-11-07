@@ -3,6 +3,8 @@ import csv, collections, json, os, re, sqlite3, sys
 from datetime import datetime
 from pathlib import Path
 
+from opym.store import DSR_STORE_SUFFIX
+
 W = Path("/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill")
 WORK = W / "storage_triage"
 S = Path(sys.argv[1]); REPORT = Path(sys.argv[2])
@@ -25,7 +27,7 @@ D["registry"] = dict(
 )
 layouts = collections.Counter()
 for (p,) in reg.execute("select output_path from stage_status where stage='deskew' and output_path is not null"):
-    layouts["viewer OME-Zarr (live lane)" if "_dsr.ome.zarr" in p else
+    layouts["viewer OME-Zarr (live lane)" if DSR_STORE_SUFFIX in p else
             "processed_tiff_series_split/Decon/DSR_decon" if "processed_tiff_series_split/Decon/DSR_decon" in p else
             "decon_stage/Decon/DSR_decon" if "decon_stage/Decon/DSR_decon" in p else
             "DSR_nodecon" if "DSR_nodecon" in p else
