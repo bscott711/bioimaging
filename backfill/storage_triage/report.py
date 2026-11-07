@@ -14,7 +14,7 @@ from backfill.storage_triage.analyze import Analysis, filesystem
 TIERS = {
     "A1": "verified duplicate copies (byte-identical to a kept copy)",
     "A2": "regenerable pipeline intermediates (final output verified complete)",
-    "A3": "viewer-export zarr copies of the DSR (napari/ChimeraX/3-D viewer read these; they fall back to the TIFFs)",
+    "A3": "viewer-export zarr copies of the DSR (cell-cinema and ChimeraX-NGFF read only these; offered only when the final holds TIFF frames for every channel)",
     "B": "datasets you labelled delete, every cross-check passed",
 }
 
@@ -69,7 +69,7 @@ def write_report(A: Analysis, out_dir: Path, rows: dict[str, dict], extra: dict)
     return summary
 
 
-def write_verdicts(A: Analysis, db_path: Path) -> None:
+def write_verdicts(A: Analysis, db_path: Path, stale: list[str] | None = None) -> None:
     """`storage_verdicts.sqlite3`: one row per assessed dataset, read by
     opym-dashboard (a contract, not shared code). Rebuilt on every report."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +80,7 @@ def write_verdicts(A: Analysis, db_path: Path) -> None:
         by_ds[s.dataset_key] += s.nbytes
         if s.rule == "DUP1":
             dup[s.dataset_key] = f"byte-identical to {s.kept_copy}"
+    stale_set = set(stale or [])
     tmp = db_path.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)
     conn = sqlite3.connect(tmp)
@@ -89,6 +90,8 @@ def write_verdicts(A: Analysis, db_path: Path) -> None:
     )
     for k, v in A.verdicts.items():
         rule, reasons = (("DUP1", [dup[k]]) if k in dup else (v.rule, v.reasons))
+        if k in stale_set:    # same columns; the badge text carries the warning
+            reasons = [*reasons, f"STALE: inventory scanned {A.scan_times.get(k, '?')[:10]}, not refreshed for this report"]
         conn.execute("INSERT INTO verdict VALUES (?,?,?,?,?,?)",
                      (k, rule, v.action, "; ".join(reasons), by_ds.get(k, 0), now))
     conn.commit()

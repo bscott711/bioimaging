@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -70,6 +71,29 @@ def candidate_pairs(raw: dict[str, list[RawFile]]) -> set[tuple[str, str]]:
     }
 
 
+def sharing_pairs(raw: dict[str, list[RawFile]], digest_of) -> set[tuple[str, str]]:
+    """Pairs of datasets that share ANY raw file >= MIN_LINK_BYTES, however small the
+    overlap, PROVEN by an equal (size, sha256). Used to find labelled siblings. An unhashed
+    file never links: equal size alone is not evidence (zarr chunks of one size recur
+    across unrelated datasets), so a link claimed from it would put a false reason in front
+    of the PI. Only candidate-pair datasets are ever hashed, so a partial copy is seen only
+    when its shared file has been hashed."""
+    by_key: dict[tuple[int, str], set[str]] = defaultdict(set)
+    for k, files in raw.items():
+        for f in files:
+            if f.size >= MIN_LINK_BYTES:
+                d = digest_of(f)
+                if d is not None:
+                    by_key[(f.size, d)].add(k)
+    out: set[tuple[str, str]] = set()
+    for owners in by_key.values():
+        ks = sorted(owners)
+        for i, a in enumerate(ks):
+            for b in ks[i + 1:]:
+                out.add((a, b))
+    return out
+
+
 def clusters(pairs: set[tuple[str, str]]) -> list[set[str]]:
     parent: dict[str, str] = {}
 
@@ -88,12 +112,89 @@ def clusters(pairs: set[tuple[str, str]]) -> list[set[str]]:
     return list(groups.values())
 
 
-def sha256_file(path: Path) -> str:
+class RateLimiter:
+    """Shared bytes-per-second cap for all hashing threads (`--max-mbps`). Each
+    `acquire(n)` reserves the next n bytes of the budget and sleeps until its slot."""
+
+    def __init__(self, bytes_per_s: float, clock=time.monotonic, sleep=time.sleep):
+        self.rate = float(bytes_per_s)
+        self._clock, self._sleep = clock, sleep
+        self._lock = threading.Lock()
+        self._next = clock()
+
+    def acquire(self, nbytes: int) -> None:
+        with self._lock:
+            now = self._clock()
+            start = max(self._next, now)
+            self._next = start + nbytes / self.rate
+        if start > now:
+            self._sleep(start - now)
+
+
+def sha256_file(path: Path, limiter: RateLimiter | None = None) -> str:
     h = hashlib.sha256()
     with open(path, "rb", buffering=0) as f:
         while chunk := f.read(CHUNK):
+            if limiter is not None:
+                limiter.acquire(len(chunk))
             h.update(chunk)
     return h.hexdigest()
+
+
+def keeper_file_problems(files: list[tuple[RawFile, Path]], stat=os.stat) -> list[str]:
+    """`os.stat` every file of the copy we keep. The inventory and the hash cache are
+    only claims about the past: a keeper file that is gone, or whose size or mtime moved,
+    no longer proves anything about the copy that relied on it."""
+    out = []
+    for f, p in files:
+        try:
+            st = stat(p)
+        except OSError as exc:
+            out.append(f"kept copy's file is missing or unreadable: {p} ({exc.strerror or exc})")
+            continue
+        if st.st_size != f.size or st.st_mtime_ns != f.mtime_ns:
+            out.append(f"kept copy's file changed since it was scanned: {p}")
+    return out
+
+
+def alias_problem(
+    keeper_files: list[tuple[RawFile, Path]], member_files: list[tuple[RawFile, Path]],
+    keeper_roots: list[Path], member_roots: list[Path], stat=os.stat,
+) -> str | None:
+    """Two "copies" that are really one: a symlinked or bind-mounted root, or a hardlink
+    farm. Identical hashes then prove nothing, and removing the alias removes the keeper's
+    data. Compare resolved roots (equal or nested) and (st_dev, st_ino) of the raw files."""
+    def real(p: Path) -> Path:
+        return Path(os.path.realpath(p))
+
+    kr = [real(r) for r in keeper_roots]
+    for m in (real(r) for r in member_roots):
+        for k in kr:
+            if m == k or m in k.parents or k in m.parents:
+                return f"resolved path {m} overlaps the kept copy's {k}"
+    ids = set()
+    for _f, p in keeper_files:
+        try:
+            st = stat(p)
+        except OSError:
+            continue
+        ids.add((st.st_dev, st.st_ino))
+    for _f, p in member_files:
+        try:
+            st = stat(p)
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) in ids:
+            return f"{p} is the same file (device/inode) as one in the kept copy"
+    return None
+
+
+def twin_files(
+    keeper: list[tuple[RawFile, Path]], member: list[tuple[RawFile, Path]], digest_of,
+) -> list[tuple[RawFile, Path]]:
+    """The keeper files that the member's files rely on: same (size, sha256)."""
+    wanted = Counter((f.size, digest_of(f)) for f, _p in member)
+    return [(f, p) for f, p in keeper if (f.size, digest_of(f)) in wanted]
 
 
 def files_to_hash(raw: dict[str, list[RawFile]], pairs: set[tuple[str, str]]) -> list[RawFile]:

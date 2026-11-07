@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -10,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+from opym.store import DSR_STORE_SUFFIX, read_progress
 
 from backfill.storage_triage import dupes, evidence
 from backfill.storage_triage.completeness import CHECK_VERSION, verify_final
@@ -57,6 +60,7 @@ class Analysis:
     cluster_info: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     pending_files: int = 0
+    scan_times: dict[str, str] = field(default_factory=dict)       # dataset_key -> scanned_at (ISO)
 
 
 def filesystem(path: str) -> str:
@@ -84,6 +88,99 @@ def _tree_root(tree: str, leaf: str, mirror_root: Path, master: str | None) -> P
     if tree == "mirror":
         return mirror_root / leaf.lstrip("/")
     return Path(master[: master.index(".zarr") + 5])
+
+
+def scan_ages(
+    conn: sqlite3.Connection, keys: list[str], now: datetime | None = None,
+) -> tuple[dict[str, float], list[str]]:
+    """Age in hours of each dataset's inventory row (`scans.scanned_at`), and the keys
+    registered but never scanned. Suggestions are only as fresh as this cache."""
+    now = now or datetime.now(UTC)
+    want = set(keys)
+    ages: dict[str, float] = {}
+    for k, ts in conn.execute("SELECT dataset_key, scanned_at FROM scans"):
+        if k not in want:
+            continue
+        try:
+            t = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=UTC)
+        ages[k] = (now - t).total_seconds() / 3600
+    return ages, sorted(want - set(ages))
+
+
+_FINAL_FRAME = re.compile(r"_C(\d+)_T(\d+)\.tif$")
+
+
+def final_tiff_channels(conn: sqlite3.Connection, key: str) -> set[int]:
+    """Channels for which the dataset's final dir holds `*_C#_T#.tif` frames."""
+    out: set[int] = set()
+    for (rel,) in conn.execute("SELECT rel FROM files WHERE dataset_key=? AND cls='final'", (key,)):
+        m = _FINAL_FRAME.search(rel.rsplit("/", 1)[-1])
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _zarr_channel_count(store: Path) -> int | None:
+    """Channel count from the zarr's own metadata when `.opym_live.json` is absent (backfill
+    exports): `omero.channels` in `.zattrs` (v2) or `zarr.json` (v3, bare or under `ome`).
+    Conservative: None unless it is a positive count, and, where the first array's shape and
+    the multiscales axes are readable, the channel axis must agree with it."""
+    attrs = None
+    for name in (".zattrs", "zarr.json"):
+        try:
+            doc = json.loads((store / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            attrs = doc.get("attributes", doc) if name == "zarr.json" else doc
+            break
+    if not isinstance(attrs, dict):
+        return None
+    ome = attrs.get("ome") if isinstance(attrs.get("ome"), dict) else attrs
+    chans = (ome.get("omero") or {}).get("channels") if isinstance(ome.get("omero"), dict) else None
+    if not isinstance(chans, list) or not chans:
+        return None
+    n = len(chans)
+    try:
+        axes = [a.get("name") if isinstance(a, dict) else a for a in ome["multiscales"][0]["axes"]]
+        shape = json.loads((store / "0" / ".zarray").read_text())["shape"]
+        if "c" in axes and len(axes) == len(shape) and shape[axes.index("c")] != n:
+            return None
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        pass                      # axes or shape unreadable: the omero list alone stands
+    return n
+
+
+def viewer_hold_reason(unit: Path, tiff_channels: set[int]) -> str | None:
+    """Why a VIEWER unit (the `viewer/` dir, or one `*_dsr.ome.zarr` in it) must not be
+    offered, or None. The TIFF fallback is not equivalent (cell-cinema and ChimeraX-NGFF
+    read only the zarr), and with output_format=ome-zarr the zarr is the only DSR copy:
+    offer it only when TIFF frames exist for every channel of every zarr it holds."""
+    try:
+        stores = [unit] if unit.name.endswith(DSR_STORE_SUFFIX) else sorted(
+            d for d in unit.iterdir() if d.name.endswith(DSR_STORE_SUFFIX)
+        )
+    except OSError as exc:
+        return f"viewer directory unreadable ({exc.strerror or exc})"
+    if not stores:
+        return "no viewer zarr store found to check"
+    for store in stores:
+        meta = read_progress(store)
+        n_c = meta.get("n_c") if isinstance(meta, dict) else None
+        if not isinstance(n_c, int) or n_c < 1:
+            n_c = _zarr_channel_count(store)      # backfill exports carry no .opym_live.json
+        if not isinstance(n_c, int) or n_c < 1:
+            return f"channel count of {store.name} is unknown, so its TIFF fallback cannot be checked"
+        if not tiff_channels:
+            return "the final output has no TIFF frames, so the viewer zarr may be the only DSR copy"
+        lacking = sorted(set(range(n_c)) - tiff_channels)
+        if lacking:
+            return f"the final output has no TIFF frames for channel(s) {lacking} of {store.name} ({n_c} channels)"
+    return None
 
 
 def check_finals(
@@ -195,7 +292,8 @@ def analyze(
     psf_scans = evidence.load_psf_sources(psf_dir)
     pinned = evidence.load_pinned(pinned_file)
     final_ok = {r["dataset_key"]: (bool(r["ok"]), r["detail"]) for r in conn.execute("SELECT * FROM final_checks")}
-    scanned = {r[0] for r in conn.execute("SELECT dataset_key FROM scans")}
+    A.scan_times = {r[0]: r[1] for r in conn.execute("SELECT dataset_key, scanned_at FROM scans")}
+    scanned = set(A.scan_times)
 
     units: dict[str, list[dict]] = defaultdict(list)
     for u in conn.execute("SELECT * FROM units"):
@@ -210,7 +308,9 @@ def analyze(
     hashes = dupes.load_hashes(conn)
 
     def digest_of(f: dupes.RawFile) -> str | None:
-        r = rows[f.dataset_key]
+        r = rows.get(f.dataset_key)
+        if r is None:      # retired from the registry: its files prove nothing
+            return None
         p = f.abspath(r["leaf_dir"], mirror_root, r["master_file"])
         return hashes.get((str(p), f.size, f.mtime_ns))
 
@@ -220,9 +320,16 @@ def analyze(
         for k in c:
             comp_of[k] = i
 
+    # any dataset sharing a raw file (even a small partial copy) can carry a conflicting label
+    partners: dict[str, set[str]] = defaultdict(set)
+    for a_, b_ in dupes.sharing_pairs(raw, digest_of):
+        partners[a_].add(b_)
+        partners[b_].add(a_)
+
     def facts_for(k: str) -> Facts:
         r = rows[k]
-        sib = {s: labels[s] for s in comps[comp_of[k]] if s != k and s in labels} if k in comp_of else {}
+        sibs = (set(comps[comp_of[k]]) if k in comp_of else set()) | partners.get(k, set())
+        sib = {s: labels[s] for s in sorted(sibs) if s != k and s in labels}
         return Facts(
             key=k, leaf_dir=r["leaf_dir"],
             status=evidence.overall_status(stages.get(k, {}), r["signal_flag"]),
@@ -253,9 +360,16 @@ def analyze(
         for tree in ("leaf", "mirror", "master"):
             tus = [u for u in us if u["tree"] == tree]
             if tree == "master":
-                mf = [f for f in raw.get(k, []) if f.tree == "master"]
-                if mf:
-                    root = _tree_root("master", r["leaf_dir"], mirror_root, r["master_file"])
+                # one row per channel store of the sample (all of them are raw and hashed)
+                by_store: dict[str, list] = defaultdict(list)
+                for f in raw.get(k, []):
+                    if f.tree == "master":
+                        by_store[f.rel.split("/", 1)[0]].append(f)
+                if not by_store:
+                    continue
+                base = _tree_root("master", r["leaf_dir"], mirror_root, r["master_file"]).parent
+                for name, mf in sorted(by_store.items()):
+                    root = base / name
                     s = Suggestion(tier, rule, k, str(root), "dir", RAW, sum(f.size for f in mf), len(mf), why, kept,
                                    [str(root)], f"{len(mf)}:{sum(f.size for f in mf)}",
                                    {RAW: sum(f.size for f in mf)})
@@ -283,6 +397,29 @@ def analyze(
         return n
 
     handled: set[str] = set()   # datasets already wholly suggested
+
+    def files_of(k: str) -> list[tuple[dupes.RawFile, Path]]:
+        r = rows[k]
+        return [(f, f.abspath(r["leaf_dir"], mirror_root, r["master_file"])) for f in raw.get(k, [])]
+
+    def roots_of(k: str) -> list[Path]:
+        r = rows[k]
+        out = [x for x in (_tree_root("leaf", r["leaf_dir"], mirror_root, None),
+                           _tree_root("mirror", r["leaf_dir"], mirror_root, None)) if x.is_dir()]
+        if r["master_file"] and any(f.tree == "master" for f in raw.get(k, [])):
+            parent = _tree_root("master", r["leaf_dir"], mirror_root, r["master_file"]).parent
+            out += [parent / n for n in sorted({f.rel.split("/", 1)[0] for f in raw[k] if f.tree == "master"})]
+        return out
+
+    def copy_problem(keeper: str, m: str) -> str | None:
+        """Re-check, at report time, that the kept copy still exists unchanged (os.stat) and
+        is not the same storage as the copy offered for deletion."""
+        mf = files_of(m)
+        tw = dupes.twin_files(files_of(keeper), mf, digest_of)
+        bad = dupes.keeper_file_problems(tw)
+        if bad:
+            return bad[0] + (f" (+{len(bad) - 1} more)" if len(bad) > 1 else "")
+        return dupes.alias_problem(tw, mf, roots_of(keeper), roots_of(m))
 
     # ---- clusters ------------------------------------------------------------------------
     for comp in comps:
@@ -329,6 +466,10 @@ def analyze(
             if verdict[m].rule not in ("K0",):
                 A.notes.append(f"{m}: redundant copy of {keeper} but verdict {verdict[m].rule}; left alone")
                 continue
+            problem = copy_problem(keeper, m)
+            if problem:
+                A.notes.append(f"{m}: byte-identical to {keeper} by hash but held: {problem}")
+                continue
             kf = final_ok.get(keeper, (False, ""))[0]
             mf_any = bool(conn.execute("SELECT 1 FROM files WHERE dataset_key=? AND cls='final' LIMIT 1", (m,)).fetchone())
             if mf_any and not kf:
@@ -338,6 +479,7 @@ def analyze(
             handled.add(m)
 
     # ---- per-dataset verdict actions -----------------------------------------------------
+    n_held = 0
     for k in keys:
         v = verdict[k]
         if k in handled:
@@ -347,11 +489,16 @@ def analyze(
             handled.add(k)
         elif v.rule == "R1":
             A.review.append(ReviewItem(k, total_bytes.get(k, 0), v.reasons))
-        elif v.rule in ("K0", "P1"):
+        elif v.rule == "P1":
+            # protected datasets (seglab training cells, PSF sources, keep labels, pins) keep
+            # their intermediates and viewer copies too
+            n_held += 1
+        elif v.rule == "K0":
             ok, detail = final_ok.get(k, (False, "final output not checked"))
             if not ok:
                 continue
             r = rows[k]
+            tiff_channels = final_tiff_channels(conn, k)
             for u in units.get(k, []):
                 if u["cls"] not in (INTER, VIEWER) or u["bytes"] < MIN_SUGGEST_BYTES:
                     continue
@@ -360,6 +507,11 @@ def analyze(
                     A.notes.append(f"{k}: {u['unit']} is not the registry's final but looks like a decon result; held")
                     continue
                 root = _tree_root(u["tree"], r["leaf_dir"], mirror_root, None)
+                if u["cls"] == VIEWER:
+                    why_held = viewer_hold_reason(root / u["unit"], tiff_channels)
+                    if why_held:
+                        A.notes.append(f"{k}: {u['unit']} held: {why_held}")
+                        continue
                 tier, rule = ("A3", "I1b") if u["cls"] == VIEWER else ("A2", "I1a")
                 A.suggestions.append(Suggestion(
                     tier, rule, k, str(root / u["unit"]), "files" if u["unit"].endswith("/*") else "dir",
@@ -368,6 +520,11 @@ def analyze(
                     "", _expand_units([u], root), f"{u['nfiles']}:{u['bytes']}:{u['max_mtime_ns']}",
                     {u["cls"]: u["bytes"]}))
 
+    if n_held:
+        A.notes.append(
+            f"{n_held} protected (P1) dataset(s): P1 for any reason (keep label, sibling keep, seglab, PSF source, pin) "
+            "withholds intermediates and viewer copies (A2/A3)"
+        )
     suggested_roots = {s.dataset_key: 0 for s in A.suggestions}
     for s in A.suggestions:
         suggested_roots[s.dataset_key] += s.nbytes

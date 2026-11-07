@@ -22,6 +22,8 @@ ACTIVE_WINDOW = timedelta(days=14)
 KEEP, SUGGEST_DELETE, REVIEW = "KEEP", "SUGGEST_DELETE", "REVIEW"
 _BEAD_PSF = re.compile(r"bead|psf|focalcheck", re.I)
 BAD_SIGNAL = ("dud", "dead", "corrupt")
+# P1 for ANY reason also withholds A2 / A3 (intermediates, viewer copies); say so in the verdict
+P1_WITHHOLDS = "protected: its intermediates and viewer copies are not offered either"
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,7 @@ def decide(f: Facts) -> Verdict:
         # a delete label colliding with protection is surfaced, not silently kept
         if f.label and f.label.label == "delete":
             return Verdict("R1", REVIEW, ["label is delete but dataset is protected"] + reasons)
-        return Verdict("P1", KEEP, reasons)
+        return Verdict("P1", KEEP, reasons + [P1_WITHHOLDS])
 
     lab = f.label
     if lab and lab.label == "delete":

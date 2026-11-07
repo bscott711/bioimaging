@@ -6,7 +6,7 @@ Regenerate: `scripts/storage_triage_notebook/README.md`. Rules and their inciden
 ## State
 - Tool `opym-storage-triage` (`scan`, `hash`, `report`, `verify`) is merged (bioimaging #17, #18, #19). Work dir
   `/mmfs2/scratch/SDSMT.LOCAL/bscott/opym_backfill/storage_triage/` holds `storage_triage.sqlite3` (inventory, hashes,
-  final-output checks) and one dated report directory (`suggestions.csv`, `paths_tier*.txt`, `review_queue.csv`,
+  final-output checks) and one time-stamped report directory per `report` run (`suggestions.csv`, `paths_tier*.txt`, `review_queue.csv`,
   `notes.txt`, `summary.json`). `storage_verdicts.sqlite3` next to `registry.sqlite3` feeds the dashboard badge.
 - First full run (2026-10-15, hashing complete, 27.9 TB read): A1 duplicate copies 5.73 TB (100 datasets), A2
   intermediates 13.3 TB, A3 viewer zarr copies 8.0 TB, B your delete labels 9.9 GB, review queue 8.07 TB (77 datasets).

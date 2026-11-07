@@ -171,14 +171,36 @@ def scan_dataset(
     master = row.get("master_file") or ""
     if master.endswith(".zarr") or ".zarr/" in master:
         store = Path(master[: master.index(".zarr") + 5])
+        stores = channel_stores(store)
         scan.exists["master"] = store.is_dir()
-        if store.is_dir():
-            for parts, is_dir, size, mtime in _walk(store):
+        # every channel store is raw: "byte-identical" must be proven for all of them
+        for st in stores:
+            if not st.is_dir():
+                continue
+            for parts, is_dir, size, mtime in _walk(st):
                 if size == -1:
-                    scan.errors.append(f"master:{'/'.join(parts)}: {mtime}")
+                    scan.errors.append(f"master:{st.name}/{'/'.join(parts)}: {mtime}")
                 elif not is_dir:
-                    scan.files.append(("master", store.name + "/" + "/".join(parts), size, mtime, RAW))
+                    scan.files.append(("master", st.name + "/" + "/".join(parts), size, mtime, RAW))
     return scan
+
+
+def channel_stores(master_store: Path) -> list[Path]:
+    """The master store plus its sibling channel stores of the same sample (the registry
+    keeps one `master_file` per dataset; the sibling grouping is opym's own
+    `group_channel_zarr_stores`, so it cannot drift from discovery). Always includes the
+    master itself."""
+    from opym.discovery import group_channel_zarr_stores, parse_zarr_group_prefix
+
+    out = [master_store]
+    if not master_store.name.endswith(".ome.zarr"):
+        return out
+    try:
+        group = group_channel_zarr_stores(master_store.parent).get(parse_zarr_group_prefix(master_store), [])
+    except OSError:
+        return out
+    out += [s for s in group if s != master_store and s.is_dir()]
+    return out
 
 
 def write_scan(conn: sqlite3.Connection, key: str, scan: Scan, final_rel: str | None) -> None:

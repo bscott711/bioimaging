@@ -33,7 +33,7 @@ def _read_full(path: Path) -> None:
         raise BlankError(f"blank: every voxel is {lo}")
 
 
-CHECK_VERSION = 3  # bump when the checks change: cached results are keyed on it
+CHECK_VERSION = 4  # bump when the checks change: cached results are keyed on it
 
 
 def _verify_single_volumes(rows: list[tuple[str, int]], root: Path, read) -> tuple[bool, str]:
@@ -60,7 +60,8 @@ def verify_tiff_series(
     """`rows`: (relpath-below-root, size) of the final dir. Requires, per
     channel, contiguous timepoints 0..T-1 with the same T across channels (and
     == the registry's `actual_timepoints` when known), no empty files, and the
-    first and last frame of every channel decodable."""
+    first, middle and last frame of every channel decodable (a zero-filled
+    interior frame is the Globus blank-output class)."""
     frames: dict[int, dict[int, tuple[str, int]]] = defaultdict(dict)
     for rel, size in rows:
         name = rel.rsplit("/", 1)[-1]
@@ -86,13 +87,13 @@ def verify_tiff_series(
         return False, f"{t} timepoints on disk, registry expects {expected_timepoints}"
     try:
         for c, by_t in frames.items():
-            for ti in (0, t - 1):
+            for ti in sorted({0, t // 2, t - 1}):
                 read(root / by_t[ti][0])
     except BlankError as exc:
         return False, f"{exc} (channel {c}, timepoint {ti})"
     except Exception as exc:  # noqa: BLE001 - any decode failure = not verified
         return False, f"unreadable frame: {exc}"
-    return True, f"{len(frames)} channel(s) x {t} timepoints, first/last frame decoded"
+    return True, f"{len(frames)} channel(s) x {t} timepoints, first/middle/last frame decoded"
 
 
 MIN_CHUNKS_FOR_UNIFORMITY = 16
