@@ -169,7 +169,7 @@ rotation at once.
 
 Pulling the production checkout is a partial deploy; pull and restart together.
 
-**Version coupling.** This bioimaging needs `opym_local` >= `e6c18db75457858082aafeab8d2156ef4d408cdb` (`e6c18db`):
+**Version coupling.** This bioimaging needs `opym_local` >= `b9189d2419c47f0736b188307f4a76f08002cd65` (`b9189d2`; the output-tree names and `leaf_for_store` come from `opym.store`):
 production was at `ae1846e`, which lacks `opym[server]`, `opym.display`, `zarr_fallback_z_step`, `registry_path` and the
 `opym.stream.bfill` / `opym.stream.outcome` additions. Pull `opym_local` and `bioimaging` in one step, then restart
 `opym-receive`, `opym-receive-backfill`, `opym-backfill`, and last `opym-serve` (it has no re-sync of its own). Pulling

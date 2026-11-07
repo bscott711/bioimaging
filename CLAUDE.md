@@ -50,7 +50,7 @@ CLAUDE.md covers the receiver, live lane and GPU supervisor. Read [README.md](RE
 - Logs: `logs/<unit>.log` (git-ignored), rotated hourly at 50 MB, 4 kept, `copytruncate`. `journalctl --user` is unreadable.
 - Pulling this checkout, or opym, is a partial deploy: pull and restart the units together, and only when asked. The three
   `uv run` units re-sync the production `.venv` on every restart (OR-02). `opym-logrotate` reads its config from this checkout.
-- **This main needs opym_local >= `e6c18db75457858082aafeab8d2156ef4d408cdb`** (`e6c18db`). Production opym_local was at `ae1846e` on 2026-11-06; that
+- **This main needs opym_local >= `b9189d2419c47f0736b188307f4a76f08002cd65`** (`b9189d2`; it imports `opym.store.leaf_for_store`, `dsr_store_name`, `viewer_store_path`, `mip_movies_dir` and the path-name constants). Production opym_local was at `ae1846e` on 2026-11-06; that
   version declares neither `opym[server]` nor the scripts bioimaging no longer registers, and lacks `opym.display`,
   `zarr_fallback_z_step`, `registry_path`, `opym.stream.bfill` constants and the health readers. Pulling bioimaging alone
   makes `opym-receive`, `opym-receive-backfill` and `.venv/bin/opym-serve` disappear and `opym-backfill` fail at import;
@@ -78,7 +78,7 @@ unset OPYM_DECON_PSF OPYM_ZARR_DEFAULT_Z_STEP OPYM_LIVE_LANE OPYM_LIVE_FORMAT OP
 HOME=$T/home ~/projects/science/bioimaging/.venv/bin/python -m pytest -q -p no:cacheprovider -m "not gpu"
 ```
 
-241 pass (2026-11-06, against the `opym[server]` lock). To test against a fresh lock without touching the production `.venv`:
+240 pass (2026-11-07, against the `opym[server]` lock and opym `b9189d2`). To test against a fresh lock without touching the production `.venv`:
 `UV_PROJECT_ENVIRONMENT=<scratch>/venv uv sync --frozen` in the worktree, then use `<scratch>/venv/bin/python` above. The env vars cover paths the conftest does not redirect (log, mirror, backfill dir, PSF and lane
 settings). Never import a test module from another directory (conftest isolation is skipped).
 

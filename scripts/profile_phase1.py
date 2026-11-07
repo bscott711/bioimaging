@@ -57,6 +57,8 @@ except ImportError as e:
 import numpy as np
 import zarr
 
+from opym.store import XY_PIXEL_SIZE_UM
+
 OPYM_LOCAL_DIR = Path(__file__).resolve().parents[2] / "opym_local"
 FIXTURES_DIR = OPYM_LOCAL_DIR / "tests" / "fixtures"
 PSF_PATH = FIXTURES_DIR / "psf" / "averaged_psf.tif"
@@ -66,7 +68,7 @@ PETAKIT_ROOT = Path(os.environ.get("PETAKIT_ROOT", "/cm/shared/apps_local/petaki
 
 # Must match the corrected production defaults (Phase 1.4: DeconIter=25).
 PIPELINE_KWARGS = dict(
-    xyPixelSize=0.136,
+    xyPixelSize=XY_PIXEL_SIZE_UM,
     z_step_um=0.3,
     dzPSF=0.1,
     DeconIter=25,

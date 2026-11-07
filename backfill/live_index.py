@@ -39,7 +39,8 @@ from opym.discovery import KIND_ZARR_PRECROPPED, LeafDataset
 from opym.ome_zarr_writer import MIP_SERIES, complete_timepoints, image_group, read_progress
 from opym.registry import StatusRegistry
 from opym.stream.live import LIVE_LATEST_NAME, live_status_is_fresh, read_live_status
-from opym.utils import mirror_root, resolve_output_base
+from opym.store import leaf_for_store, mip_movies_dir
+from opym.utils import resolve_output_base
 
 from backfill.cli import MIP_ENCODE_LOCK, _run_mip_encode
 from backfill.mip_movie import build_poster_from_frames
@@ -64,28 +65,16 @@ class _Session:
     seen_at: float = 0.0
 
 
-def _leaf_for_store(store: Path) -> Path | None:
-    """Inverse of `opym.stream.live.live_viewer_store`: the store is
-    `resolve_output_base(leaf)/viewer/<leaf name>_dsr.ome.zarr`."""
-    base = store.parent.parent
-    if store.parent.name != "viewer":
-        return None
-    try:
-        leaf = Path("/") / base.relative_to(mirror_root())
-    except ValueError:
-        leaf = base
-    return leaf if store.name == f"{leaf.name}_dsr.ome.zarr" else None
-
-
 def dataset_for_session(info: dict, roots: list[Path]) -> LeafDataset | None:
     """The `LeafDataset` discovery will produce for this session once its raw
     stores have drained (`<raw_dir>/<base>_<label>.ome.zarr`, grouped under
     `<raw_dir>/<base>`), or None when it isn't under a scanned root -- then
     discovery would never see it either."""
     store = Path(info.get("store") or "")
-    leaf = _leaf_for_store(store)
-    if leaf is None:
+    leaf_name = leaf_for_store(store)
+    if leaf_name is None:
         return None
+    leaf = Path(leaf_name)
     root = next((Path(r) for r in roots if leaf.is_relative_to(r)), None)
     if root is None:
         return None
@@ -204,7 +193,7 @@ class LiveIndex:
             s.preview_t = t
 
     def _movies_dir(self, s: _Session) -> Path:
-        return resolve_output_base(s.ds.leaf_dir) / "mip_movies"
+        return mip_movies_dir(resolve_output_base(s.ds.leaf_dir))
 
     def _finalize(self, s: _Session, status: dict) -> None:
         key = s.ds.dataset_key

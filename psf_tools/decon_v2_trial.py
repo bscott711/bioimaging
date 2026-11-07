@@ -40,6 +40,7 @@ from opym.decon_config import (
     DSR_INTERP_METHOD,
     XY_PIXEL_SIZE_UM,
 )
+from opym.store import viewer_store_path
 
 WORKSPACE = Path(os.environ.get("DECON_V2_WORKSPACE", "/mmfs2/scratch/SDSMT.LOCAL/bscott/decon_sweeps/20261015_decon_v2"))
 DATASET = Path(
@@ -368,7 +369,7 @@ def reference_volume(cell: str, channel: int) -> np.ndarray:
     sp = spec(cell)
     ref = sp.reference
     if ref is None:
-        z = zarr.open(str(DATASET / cell / "viewer" / f"{cell}_dsr.ome.zarr"), mode="r")
+        z = zarr.open(str(viewer_store_path(DATASET / cell, cell)), mode="r")
         return np.asarray(z["0/0"][sp.t, channel])
     if ref["kind"] == "zarr":
         return np.asarray(zarr.open(ref["path"], mode="r")["0/0"][ref["t"], ref.get("c", channel)])

@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from collections import defaultdict
 
+from opym.display import default_channel_color, napari_colormap_name
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python view_zarr_timeseries.py /path/to/Decon/")
@@ -34,9 +36,7 @@ def main():
     
     viewer = napari.Viewer()
     
-    colors = ['cyan', 'magenta', 'yellow', 'green']
-    
-    for i, (c, files) in enumerate(sorted(channels.items())):
+    for c, files in sorted(channels.items()):
         files.sort(key=lambda x: x[0]) # Sort by timepoint
         
         lazy_arrays = []
@@ -57,7 +57,7 @@ def main():
         viewer.add_image(
             stacked, 
             name=f"Channel {c}", 
-            colormap=colors[i % len(colors)],
+            colormap=napari_colormap_name(default_channel_color(c)),
             blending='additive'
         )
         

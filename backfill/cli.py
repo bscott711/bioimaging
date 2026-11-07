@@ -30,6 +30,7 @@ from opym.petakit import resolve_deskew_working_dir
 from opym.registry import MAX_STAGE_FAILURES, StatusRegistry
 from opym.registry import registry_path as opym_registry_path
 from opym.ome_zarr_writer import mip_stacks
+from opym.store import mip_movies_dir
 from opym.utils import resolve_output_base, sanitize_filename
 
 from backfill.log import forget, log, log_once
@@ -352,7 +353,7 @@ def _run_mip_encode_locked(
         # Same mirror-aware base pipeline.py's triage preview uses, so both
         # writers of "mip_movies" for this dataset always agree on where it
         # lives regardless of which one ran first.
-        movies_dir = resolve_output_base(ds.leaf_dir) / "mip_movies"
+        movies_dir = mip_movies_dir(resolve_output_base(ds.leaf_dir))
         store = processed_store_for(ds)
         if store is not None and not _deskew_result_is(registry, ds, store):
             # The live lane left this store, but batch deskew made the result

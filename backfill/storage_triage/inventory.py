@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from opym.store import DSR_STORE_SUFFIX, MIP_MOVIES_DIR, VIEWER_DIR
+
 RAW, FINAL, PROV, INTER, VIEWER, UNKNOWN = (
     "raw", "final", "provenance", "intermediate", "viewer_export", "unknown",
 )
@@ -31,7 +33,7 @@ _PROV_FILE = re.compile(r"\.(json|txt|mat|log|cxc|csv|md)$", re.I)
 # Directories the pipeline writes; anything under them that is not final or
 # provenance is a regenerable intermediate.
 _DERIVED_TOPS = {"processed_ngff", "processed_tiff_series_split", "decon_stage", "zarr_mirror"}
-_PROV_TOPS = {"mip_movies", "decon_qc"}
+_PROV_TOPS = {MIP_MOVIES_DIR, "decon_qc"}
 # Wrapper dirs whose loose files and child dirs are separate deletable units.
 _WRAPPERS = {"processed_tiff_series_split", "decon_stage", "zarr_mirror", "Decon"}
 MIN_SUGGEST_BYTES = 50 * 2**20  # units smaller than this are inventoried, never suggested
@@ -61,8 +63,8 @@ def classify(parts: tuple[str, ...], is_dir: bool, final_rel: tuple[str, ...] | 
         return PROV if _PROV_FILE.search(name) else UNKNOWN
     if top in _PROV_TOPS:
         return PROV
-    if top == "viewer":
-        if len(parts) >= 2 and parts[1].endswith("_dsr.ome.zarr"):
+    if top == VIEWER_DIR:
+        if len(parts) >= 2 and parts[1].endswith(DSR_STORE_SUFFIX):
             return VIEWER
         return PROV
     if top in _DERIVED_TOPS:

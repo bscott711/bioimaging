@@ -39,6 +39,7 @@ import tifffile
 # timepoint by timepoint during acquisition; see export_for_viewers.
 from opym import ome_zarr_writer  # noqa: E402
 from opym.ome_zarr_writer import DSR_VOXEL_UM, PYRAMID_LEVELS  # noqa: E402,F401
+from opym.store import dsr_store_name  # noqa: E402
 from opym.stream.live import channel_label as live_channel_label  # noqa: E402
 
 from opym import timeline  # noqa: E402
@@ -275,7 +276,7 @@ def export_for_viewers(
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = parse_dsr_frames(dsr_dir, single_names)
     labels = channel_labels or []
-    zarr_out = out_dir / f"{name}_dsr.ome.zarr"
+    zarr_out = out_dir / dsr_store_name(name)
     # Decided before stamping: stamping rewrites each frame's metadata (never
     # its pixels), which would otherwise make every frame look newer than the
     # store and force a needless rebuild.

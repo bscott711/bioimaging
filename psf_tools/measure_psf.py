@@ -2,6 +2,8 @@ import tifffile
 import numpy as np
 from scipy.optimize import curve_fit
 
+from opym.store import XY_PIXEL_SIZE_UM
+
 def gaussian_1d(x, a, x0, sigma, offset):
     return a * np.exp(-(x - x0)**2 / (2 * sigma**2)) + offset
 
@@ -21,6 +23,6 @@ try:
     popt_x, _ = curve_fit(gaussian_1d, np.arange(len(x_prof)), x_prof, p0=[np.max(x_prof), x_idx, 2.0, 0])
 
     print(f"Master PSF Sigmas (pixels): Z={abs(popt_z[2]):.2f}, Y={abs(popt_y[2]):.2f}, X={abs(popt_x[2]):.2f}")
-    print(f"Master PSF Sigmas (microns): Z={abs(popt_z[2])*0.1:.2f}, Y={abs(popt_y[2])*0.136:.2f}, X={abs(popt_x[2])*0.136:.2f}")
+    print(f"Master PSF Sigmas (microns): Z={abs(popt_z[2])*0.1:.2f}, Y={abs(popt_y[2])*XY_PIXEL_SIZE_UM:.2f}, X={abs(popt_x[2])*XY_PIXEL_SIZE_UM:.2f}")
 except Exception as e:
     print(e)

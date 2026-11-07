@@ -3,6 +3,8 @@ import numpy as np
 from scipy.optimize import curve_fit
 import scipy.ndimage as ndi
 
+from opym.store import XY_PIXEL_SIZE_UM
+
 def gaussian_1d(x, a, x0, sigma, offset):
     return a * np.exp(-(x - x0)**2 / (2 * sigma**2)) + offset
 
@@ -59,10 +61,10 @@ if len(sigmas_z) > 0:
     med_sx = np.median(sigmas_x)
     print(f"Median Sigmas (pixels): Z={med_sz:.2f}, Y={med_sy:.2f}, X={med_sx:.2f}")
     # Convert to physical microns.
-    # Note: Z step in data is 0.3, X/Y is 0.136
+    # Note: Z step in data is 0.3, X/Y is XY_PIXEL_SIZE_UM
     phys_z = med_sz * 0.3
-    phys_y = med_sy * 0.136
-    phys_x = med_sx * 0.136
+    phys_y = med_sy * XY_PIXEL_SIZE_UM
+    phys_x = med_sx * XY_PIXEL_SIZE_UM
     
     # Correct Z for skew (divide by cos(30) if we measured straight down the slanted volume)
     # Z_true = Z_apparent * cos(30)
